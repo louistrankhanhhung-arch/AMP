@@ -70,6 +70,31 @@ def detect_divergence(df: pd.DataFrame) -> Dict[str, str]:
     if price.iloc[-1] >= price.max() - 1e-9 and rsi.iloc[-1] < rsi.max() - 1e-9:
         return {"rsi_price": "bearish"}
     return {"rsi_price": "none"}
+# (1) Thêm lại vào structure_engine.py, ngay dưới detect_divergence()
+
+def recent_swing_high(swings: list[dict]) -> float | None:
+    """Lấy đỉnh (HH) gần nhất trong list swings, nếu có."""
+    for s in reversed(swings):
+        if s.get("type") == "HH":
+            return float(s["price"])
+    return None
+
+def detect_breakout(df: pd.DataFrame, swings: list[dict], vol_thr: float = 1.5) -> dict:
+    """
+    Breakout đơn giản:
+    - Close hiện tại > swing-high gần nhất (nếu có), và
+    - Khối lượng hiện tại >= vol_thr * SMA20 (dùng vol_ratio)
+    Trả về: {"levels":[...], "last_breakout_confirmed": bool}
+    """
+    levels = []
+    hh = recent_swing_high(swings)
+    confirmed = False
+    if hh is not None:
+        levels.append(hh)
+        close = float(df["close"].iloc[-1])
+        vol_ratio = float(df["vol_ratio"].iloc[-1]) if "vol_ratio" in df.columns else 1.0
+        confirmed = (close > hh) and (vol_ratio >= vol_thr)
+    return {"breakout_levels": levels, "last_breakout_confirmed": confirmed}
 
 # -------------------------
 # 3) Cluster SR thành TP bands + ETA
@@ -135,6 +160,7 @@ def build_struct_json(symbol: str, tf: str, df: pd.DataFrame) -> Dict[str, Any]:
     sr = find_sr(df, swings)
     pullback = detect_retest(df)
     div = detect_divergence(df)
+    bo = detect_breakout(df, swings, vol_thr=1.5)
 
     # flags ngữ cảnh cho ETA
     flags = {
@@ -180,6 +206,7 @@ def build_struct_json(symbol: str, tf: str, df: pd.DataFrame) -> Dict[str, Any]:
             "trend": trend,
             "pullback": pullback,
             "bb_behaviour": "riding_upper_band" if flags["riding_upper"] else "below_mid"
+            "events": bo,
         },
         "events": {"breakout_levels": [], "last_breakout_confirmed": False},
         "divergence": div,
