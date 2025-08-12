@@ -1,5 +1,6 @@
 # structure_engine.py
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
+
 import pandas as pd
 import numpy as np
 
@@ -149,7 +150,7 @@ def detect_divergence(df: pd.DataFrame) -> Dict[str, str]:
     return {"rsi_price": "none"}
 
 # --- Breakout helpers (dùng List[Dict[str,Any]] để tương thích tốt) ---
-def recent_swing_high(swings: List[Dict[str, Any]]) -> float | None:
+def recent_swing_high(swings: List[Dict[str, Any]]) -> Optional[float]:
     for s in reversed(swings):
         if s.get("type") == "HH":
             return float(s["price"])
