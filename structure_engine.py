@@ -37,7 +37,7 @@ def find_swings(df: pd.DataFrame, zigzag_pct: float = 2.0):
     return out[-20:]
 
 # -------------------------
-# 2) Trend / SR / Pullback / Divergence
+# 2) Trend / SR / Pullback / Divergence / Volume / Candle
 # -------------------------
 def detect_trend(df: pd.DataFrame, swings) -> Dict[str, Any]:
     ema20, ema50 = df['ema20'].iloc[-1], df['ema50'].iloc[-1]
@@ -50,6 +50,88 @@ def find_sr(df: pd.DataFrame, swings) -> Dict[str, list]:
     sr_up = sorted({round(x, 2) for x in closes.nlargest(6).tolist()})
     sr_down = sorted({round(x, 2) for x in closes.nsmallest(6).tolist()})
     return {"sr_up": sr_up, "sr_down": sr_down}
+
+# structure_engine.py — thêm helpers
+
+def soft_sr_levels(df: pd.DataFrame, side: str = "long") -> Dict[str, list]:
+    """Sinh SR mềm từ EMA/SMA/BB."""
+    last = df.iloc[-1]
+    near_up = []
+    near_dn = []
+    # Các mức tiềm năng
+    candidates = {
+        "BB.upper": float(last['bb_upper']),
+        "BB.mid":   float(last['bb_mid']),
+        "BB.lower": float(last['bb_lower']),
+        "EMA20":    float(last['ema20']),
+        "EMA50":    float(last['ema50']),
+        "SMA20":    float(last.get('sma20', last['ema20'])),
+        "SMA50":    float(last.get('sma50', last['ema50'])),
+    }
+    px = float(last['close'])
+    for name, lvl in candidates.items():
+        if np.isnan(lvl): 
+            continue
+        if lvl > px: near_up.append((name, lvl))
+        if lvl < px: near_dn.append((name, lvl))
+
+    near_up  = [dict(name=n, level=l) for n,l in sorted(near_up, key=lambda x: x[1])]
+    near_dn  = [dict(name=n, level=l) for n,l in sorted(near_dn, key=lambda x: x[1], reverse=True)]
+    return {"soft_up": near_up, "soft_down": near_dn}
+
+def volume_confirmations(df: pd.DataFrame) -> Dict[str, Any]:
+    vr = float(df['vol_ratio'].iloc[-1]) if 'vol_ratio' in df.columns else 1.0
+    vz = float(df['vol_z20'].iloc[-1]) if 'vol_z20' in df.columns else 0.0
+
+    # contraction check: trung bình 3 nến gần nhất < SMA20
+    vol_contraction = df['volume'].tail(3).mean() < df['vol_sma20'].iloc[-1]
+    # xu hướng vol giảm trong pullback: 3 nến liên tiếp giảm hoặc trung bình 5 nến < 10 nến
+    v5 = df['volume'].tail(5).mean(); v10 = df['volume'].tail(10).mean()
+    pb_healthy = vol_contraction and (v5 < v10)
+
+    return {
+        "vol_ratio": vr,
+        "vol_z20": vz,
+        "breakout_vol_ok": (vr >= 1.5) or (vz >= 1.0),
+        "breakdown_vol_ok": (vr >= 1.5) or (vz >= 1.0),
+        "pullback_vol_healthy": bool(pb_healthy),
+    }
+
+def candle_flags(df: pd.DataFrame) -> Dict[str, bool]:
+    """Một số mẫu nến & cụm nến hay dùng."""
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else last
+
+    body = float(last['body_pct']) if 'body_pct' in df.columns else 0.0
+    uw   = float(last['upper_wick_pct']) if 'upper_wick_pct' in df.columns else 0.0
+    lw   = float(last['lower_wick_pct']) if 'lower_wick_pct' in df.columns else 0.0
+    green = last['close'] > last['open']
+    red   = last['close'] < last['open']
+
+    # Pin bar / Hammer / Shooting star
+    bullish_pin = (lw >= 50) and (body <= 30) and green
+    bearish_pin = (uw >= 50) and (body <= 30) and red
+
+    # Engulfing
+    bull_engulf = (green and prev['close'] < prev['open'] and
+                   last['close'] > prev['open'] and last['open'] < prev['close'])
+    bear_engulf = (red and prev['close'] > prev['open'] and
+                   last['close'] < prev['open'] and last['open'] > prev['close'])
+
+    # Inside bar breakout (đơn giản)
+    inside = (last['high'] <= prev['high']) and (last['low'] >= prev['low'])
+    breakout_up_next = False
+    breakout_dn_next = False
+
+    return {
+        "bullish_pin": bool(bullish_pin),
+        "bearish_pin": bool(bearish_pin),
+        "bullish_engulf": bool(bull_engulf),
+        "bearish_engulf": bool(bear_engulf),
+        "inside_bar": bool(inside),
+        "breakout_up_next": bool(breakout_up_next),
+        "breakout_dn_next": bool(breakout_dn_next),
+    }
 
 def detect_retest(df: pd.DataFrame) -> Dict[str, Any]:
     last = df.iloc[-1]
@@ -74,11 +156,6 @@ def recent_swing_high(swings: List[Dict[str, Any]]) -> float | None:
     return None
 
 def detect_breakout(df: pd.DataFrame, swings: List[Dict[str, Any]], vol_thr: float = 1.5) -> dict:
-    """
-    Breakout đơn giản:
-    - Close hiện tại > swing-high gần nhất (nếu có), và
-    - Khối lượng hiện tại >= vol_thr * SMA20 (vol_ratio)
-    """
     levels = []
     hh = recent_swing_high(swings)
     confirmed = False
@@ -86,7 +163,8 @@ def detect_breakout(df: pd.DataFrame, swings: List[Dict[str, Any]], vol_thr: flo
         levels.append(hh)
         close = float(df["close"].iloc[-1])
         vol_ratio = float(df["vol_ratio"].iloc[-1]) if "vol_ratio" in df.columns else 1.0
-        confirmed = (close > hh) and (vol_ratio >= vol_thr)
+        vol_ok = vol_ratio >= vol_thr or float(df.get("vol_z20", pd.Series([0])).iloc[-1]) >= 1.0
+        confirmed = (close > hh) and vol_ok
     return {"breakout_levels": levels, "last_breakout_confirmed": confirmed}
 
 # -------------------------
@@ -160,7 +238,11 @@ def build_struct_json(symbol: str, tf: str, df: pd.DataFrame) -> Dict[str, Any]:
     if flags["riding_upper"]: coef *= 0.7
     if flags["bb_squeeze"]:   coef *= 1.3
     eta_bands = eta_for_bands(close, bands, atr, tf_hours, coef)
-
+    
+    volc = volume_confirmations(df)
+    soft = soft_sr_levels(df)
+    cndl = candle_flags(df)
+    
     struct = {
         "symbol": symbol,
         "asof": str(df.index[-1]),
@@ -181,18 +263,25 @@ def build_struct_json(symbol: str, tf: str, df: pd.DataFrame) -> Dict[str, Any]:
                        "sma20": float(df['vol_sma20'].iloc[-1])},
         },
         "structure": {
-            "swings": swings,
-            "trend": trend,
-            "pullback": pullback,
-            "bb_flags": {
-                "riding_upper_band": flags["riding_upper"],
-                "bb_contraction": flags["bb_squeeze"]
-            }
+        "swings": swings,
+        "trend": trend,
+        "pullback": {
+            **pullback,
+            "vol_healthy": volc["pullback_vol_healthy"]  # xác nhận pullback lành mạnh
         },
-        "events": bo,  # <-- breakout đưa ở cấp top-level
-        "divergence": div,
-        "levels": sr,  # giữ SR gốc
-        "targets": {"up_bands": bands},
-        "eta_hint": {"method": "ATR", "per": "bar", "up_bands": eta_bands}
+        "bb_flags": {
+            "riding_upper_band": flags["riding_upper"],
+            "bb_contraction": flags["bb_squeeze"]
+        }
+    },
+    "events": {**bo, "breakout_vol_ok": volc["breakout_vol_ok"]},
+    "divergence": div,
+    "levels": {**sr, "soft_sr": soft},      # GIỮ SR gốc & thêm SR mềm
+    "targets": {"up_bands": bands},         # TP bands (hard SR gom)
+    "eta_hint": {"method": "ATR", "per": "bar", "up_bands": eta_bands},
+    "confirmations": {
+        "volume": volc,
+        "candles": cndl
     }
+}
     return struct
