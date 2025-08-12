@@ -1,0 +1,46 @@
+import pandas as pd
+import numpy as np
+
+def ema(series: pd.Series, span: int) -> pd.Series:
+    return series.ewm(span=span, adjust=False).mean()
+
+def sma(series: pd.Series, window: int) -> pd.Series:
+    return series.rolling(window).mean()
+
+def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    roll_up = up.ewm(alpha=1/period, adjust=False).mean()
+    roll_down = down.ewm(alpha=1/period, adjust=False).mean()
+    rs = roll_up / roll_down.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50)
+
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
+
+def bollinger(series: pd.Series, window: int = 20, num_std: float = 2.0):
+    mid = sma(series, window)
+    std = series.rolling(window).std()
+    upper = mid + num_std * std
+    lower = mid - num_std * std
+    return upper, mid, lower, (upper - lower) / mid * 100
+
+def enrich_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out['ema20'] = ema(out['close'], 20)
+    out['ema50'] = ema(out['close'], 50)
+    ub, mid, lb, width_pct = bollinger(out['close'], 20, 2.0)
+    out['bb_upper'], out['bb_mid'], out['bb_lower'], out['bb_width_pct'] = ub, mid, lb, width_pct
+    out['rsi14'] = rsi(out['close'], 14)
+    out['atr14'] = atr(out, 14)
+    out['vol_sma20'] = sma(out['volume'], 20)
+    out['vol_ratio'] = out['volume'] / out['vol_sma20'].replace(0, np.nan)
+    out['dist_to_ema20_pct'] = (out['close'] - out['ema20']) / out['ema20'] * 100
+    out['dist_to_ema50_pct'] = (out['close'] - out['ema50']) / out['ema50'] * 100
+    return out
