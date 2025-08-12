@@ -9,7 +9,7 @@ from chart_renderer import render_chart
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--mode', choices=['onboard','coverage'], default='onboard')
-    ap.add_argument('--symbol', default='BTCUSDT')
+    ap.add_argument('--symbol', default='BTC/USDT')
     ap.add_argument('--tfs', default='4H,1D', help="Comma-separated list of timeframes, e.g. 4H,1D")
     ap.add_argument('--limit', type=int, default=100, help="Number of candles per timeframe")
     args = ap.parse_args()
