@@ -1,6 +1,6 @@
 import argparse, json
 from kucoin_api import fetch_batch
-from indicators import enrich_indicators
+from indicators import enrich_indicators, enrich_more
 from structure_engine import build_struct_json
 from filter import rank_all
 from chart_renderer import render_chart
@@ -19,6 +19,7 @@ def main():
     structs = []
     for tf, df in batch.items():
         df = enrich_indicators(df)
+        df = enrich_more(df)
         struct = build_struct_json(args.symbol, tf, df)
         structs.append(struct)
 
