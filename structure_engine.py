@@ -14,10 +14,7 @@ def _zigzag(series: pd.Series, pct: float = 2.0) -> List[Tuple[pd.Timestamp, flo
     last_t = series.index[0]
     direction = 0  # 1 up, -1 down, 0 none
     for t, v in series.items():
-        if last_ext == 0:
-            change_pct = 0
-        else:
-            change_pct = (v - last_ext) / last_ext * 100
+        change_pct = (v - last_ext) / last_ext * 100 if last_ext != 0 else 0
         if direction >= 0 and change_pct >= pct:
             pts.append((last_t, last_ext))
             last_ext, last_t, direction = v, t, 1
@@ -25,7 +22,6 @@ def _zigzag(series: pd.Series, pct: float = 2.0) -> List[Tuple[pd.Timestamp, flo
             pts.append((last_t, last_ext))
             last_ext, last_t, direction = v, t, -1
         else:
-            # update extreme in the current direction
             if (direction >= 0 and v > last_ext) or (direction <= 0 and v < last_ext):
                 last_ext, last_t = v, t
     pts.append((last_t, last_ext))
@@ -38,7 +34,7 @@ def find_swings(df: pd.DataFrame, zigzag_pct: float = 2.0):
         prev, curr = zz[i-1][1], zz[i][1]
         t = zz[i][0]
         out.append({"type": "HH" if curr > prev else "LL", "t": str(t), "price": float(curr)})
-    return out[-20:]  # giữ 20 điểm gần nhất
+    return out[-20:]
 
 # -------------------------
 # 2) Trend / SR / Pullback / Divergence
@@ -50,7 +46,6 @@ def detect_trend(df: pd.DataFrame, swings) -> Dict[str, Any]:
     return {"state": state, "basis": "ema20 vs ema50", "age_bars": age}
 
 def find_sr(df: pd.DataFrame, swings) -> Dict[str, list]:
-    # đơn giản: lấy vài đỉnh/đáy gần nhất làm SR
     closes = df['close'].tail(200)
     sr_up = sorted({round(x, 2) for x in closes.nlargest(6).tolist()})
     sr_down = sorted({round(x, 2) for x in closes.nsmallest(6).tolist()})
@@ -70,21 +65,19 @@ def detect_divergence(df: pd.DataFrame) -> Dict[str, str]:
     if price.iloc[-1] >= price.max() - 1e-9 and rsi.iloc[-1] < rsi.max() - 1e-9:
         return {"rsi_price": "bearish"}
     return {"rsi_price": "none"}
-# (1) Thêm lại vào structure_engine.py, ngay dưới detect_divergence()
 
-def recent_swing_high(swings: list[dict]) -> float | None:
-    """Lấy đỉnh (HH) gần nhất trong list swings, nếu có."""
+# --- Breakout helpers (dùng List[Dict[str,Any]] để tương thích tốt) ---
+def recent_swing_high(swings: List[Dict[str, Any]]) -> float | None:
     for s in reversed(swings):
         if s.get("type") == "HH":
             return float(s["price"])
     return None
 
-def detect_breakout(df: pd.DataFrame, swings: list[dict], vol_thr: float = 1.5) -> dict:
+def detect_breakout(df: pd.DataFrame, swings: List[Dict[str, Any]], vol_thr: float = 1.5) -> dict:
     """
     Breakout đơn giản:
     - Close hiện tại > swing-high gần nhất (nếu có), và
-    - Khối lượng hiện tại >= vol_thr * SMA20 (dùng vol_ratio)
-    Trả về: {"levels":[...], "last_breakout_confirmed": bool}
+    - Khối lượng hiện tại >= vol_thr * SMA20 (vol_ratio)
     """
     levels = []
     hh = recent_swing_high(swings)
@@ -100,10 +93,6 @@ def detect_breakout(df: pd.DataFrame, swings: list[dict], vol_thr: float = 1.5) 
 # 3) Cluster SR thành TP bands + ETA
 # -------------------------
 def cluster_levels(levels: List[float], atr: float, k: float = 0.7):
-    """
-    Gom các mức SR gần nhau thành band nếu khoảng cách < k * ATR.
-    Trả về list dict: {"band":[low, high], "tp": midpoint}
-    """
     if atr is None or atr <= 0 or not levels:
         return []
     levels = sorted(levels)
@@ -122,19 +111,12 @@ def cluster_levels(levels: List[float], atr: float, k: float = 0.7):
 
 def _tf_to_hours(tf: str) -> int:
     tf = tf.upper()
-    if tf.endswith("H"):
-        return int(tf[:-1])
-    if tf.endswith("D"):
-        return int(tf[:-1]) * 24
-    if tf.endswith("W"):
-        return int(tf[:-1]) * 24 * 7
-    return 24  # default
+    if tf.endswith("H"): return int(tf[:-1])
+    if tf.endswith("D"): return int(tf[:-1]) * 24
+    if tf.endswith("W"): return int(tf[:-1]) * 24 * 7
+    return 24
 
 def eta_for_bands(close: float, bands, atr: float, tf_hours: int, coef: float = 1.0):
-    """
-    Tính ETA cho từng band theo ATR, trả về list:
-    {"band":[lo,hi], "tp":x, "eta_bars":n, "eta_hours":h, "eta_days":d}
-    """
     outs = []
     atr = max(atr, 1e-9)
     for b in bands:
@@ -152,7 +134,7 @@ def eta_for_bands(close: float, bands, atr: float, tf_hours: int, coef: float = 
     return outs
 
 # -------------------------
-# 4) Build STRUCT JSON (giữ SR gốc + thêm bands & ETA)
+# 4) Build STRUCT JSON
 # -------------------------
 def build_struct_json(symbol: str, tf: str, df: pd.DataFrame) -> Dict[str, Any]:
     swings = find_swings(df)
@@ -162,9 +144,9 @@ def build_struct_json(symbol: str, tf: str, df: pd.DataFrame) -> Dict[str, Any]:
     div = detect_divergence(df)
     bo = detect_breakout(df, swings, vol_thr=1.5)
 
-    # flags ngữ cảnh cho ETA
+    # Flags BB
     flags = {
-        "riding_upper": bool((df['close'].iloc[-1] > df['bb_mid'].iloc[-1])),
+        "riding_upper": bool(df['close'].iloc[-1] > df['bb_mid'].iloc[-1]),
         "bb_squeeze": bool(df['bb_width_pct'].iloc[-1] < df['bb_width_pct'].tail(50).median())
     }
 
@@ -172,14 +154,11 @@ def build_struct_json(symbol: str, tf: str, df: pd.DataFrame) -> Dict[str, Any]:
     atr = float(df['atr14'].iloc[-1] or 0.0)
     tf_hours = _tf_to_hours(tf)
 
-    # --- NEW: gom SR_up thành bands & tính ETA theo bars/hours/days ---
-    bands = cluster_levels(sr.get('sr_up', [])[:6], atr=atr, k=0.7)  # bạn có thể chỉnh k
-    # hệ số ngữ cảnh
+    # Bands + ETA
+    bands = cluster_levels(sr.get('sr_up', [])[:6], atr=atr, k=0.7)
     coef = 1.0
-    if flags["riding_upper"]:
-        coef *= 0.7
-    if flags["bb_squeeze"]:
-        coef *= 1.3
+    if flags["riding_upper"]: coef *= 0.7
+    if flags["bb_squeeze"]:   coef *= 1.3
     eta_bands = eta_for_bands(close, bands, atr, tf_hours, coef)
 
     struct = {
@@ -205,16 +184,14 @@ def build_struct_json(symbol: str, tf: str, df: pd.DataFrame) -> Dict[str, Any]:
             "swings": swings,
             "trend": trend,
             "pullback": pullback,
-            "bb_behaviour": "riding_upper_band" if flags["riding_upper"] else "below_mid"
-            "events": bo,
+            "bb_flags": {
+                "riding_upper_band": flags["riding_upper"],
+                "bb_contraction": flags["bb_squeeze"]
+            }
         },
-        "events": {"breakout_levels": [], "last_breakout_confirmed": False},
+        "events": bo,  # <-- breakout đưa ở cấp top-level
         "divergence": div,
-
-        # GIỮ SR gốc để GPT tham chiếu khi cần
-        "levels": sr,
-
-        # NEW: targets theo bands (đã gom) + ETA chi tiết
+        "levels": sr,  # giữ SR gốc
         "targets": {"up_bands": bands},
         "eta_hint": {"method": "ATR", "per": "bar", "up_bands": eta_bands}
     }
