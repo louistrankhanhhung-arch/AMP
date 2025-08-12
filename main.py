@@ -1,6 +1,6 @@
+
 import argparse, json
-from config import settings
-from kucoin_api import fetch_ohlcv
+from kucoin_api import fetch_batch
 from indicators import enrich_indicators
 from structure_engine import build_struct_json
 from filter import rank_all
@@ -10,18 +10,27 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--mode', choices=['onboard','coverage'], default='onboard')
     ap.add_argument('--symbol', default='BTCUSDT')
-    ap.add_argument('--tf', default='4H')
+    ap.add_argument('--tfs', default='4H,1D', help="Comma-separated list of timeframes, e.g. 4H,1D")
+    ap.add_argument('--limit', type=int, default=100, help="Number of candles per timeframe")
     args = ap.parse_args()
 
-    df = fetch_ohlcv(args.symbol, args.tf, limit=300)
-    df = enrich_indicators(df)
-    struct = build_struct_json(args.symbol, args.tf, df)
-    ranks = rank_all([struct])
-    print(json.dumps([r.__dict__ for r in ranks], ensure_ascii=False, indent=2))
+    tfs = [x.strip().upper() for x in args.tfs.split(',') if x.strip()]
+    batch = fetch_batch(args.symbol, timeframes=tfs, limit=args.limit)
 
-    out_img = '/mnt/data/preview.png'
-    render_chart(df, out_img)
-    print('Chart saved to', out_img)
+    structs = []
+    for tf, df in batch.items():
+        df = enrich_indicators(df)
+        struct = build_struct_json(args.symbol, tf, df)
+        structs.append(struct)
+
+        # Lưu chart mỗi khung để xem nhanh
+        out_img = f'/mnt/data/{args.symbol}_{tf}.png'
+        render_chart(df, out_img)
+        print(f'Chart for {args.symbol} {tf} saved to', out_img)
+
+    # Xếp hạng & in kết quả
+    ranks = rank_all(structs)
+    print(json.dumps([r.__dict__ for r in ranks], ensure_ascii=False, indent=2))
 
 if __name__ == '__main__':
     main()
