@@ -1,4 +1,3 @@
-
 import argparse, json
 from kucoin_api import fetch_batch
 from indicators import enrich_indicators
