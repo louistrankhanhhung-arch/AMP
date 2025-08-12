@@ -1,10 +1,10 @@
 import argparse, json
-from app.config import settings
-from app.kucoin_api import fetch_ohlcv
-from app.indicators import enrich_indicators
-from app.structure_engine import build_struct_json
-from app.filter import rank_all
-from app.chart_renderer import render_chart
+from config import settings
+from kucoin_api import fetch_ohlcv
+from indicators import enrich_indicators
+from structure_engine import build_struct_json
+from filter import rank_all
+from chart_renderer import render_chart
 
 def main():
     ap = argparse.ArgumentParser()
