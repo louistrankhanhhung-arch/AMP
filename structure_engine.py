@@ -37,6 +37,15 @@ def find_swings(df: pd.DataFrame, zigzag_pct: float = 2.0):
         out.append({"type": "HH" if curr > prev else "LL", "t": str(t), "price": float(curr)})
     return out[-20:]
 
+def classify_market_structure(swings):
+    ms_points = []
+    for i in range(1, len(swings)):
+        if swings[i]["type"] == "HH" and swings[i-1]["type"] == "HL":
+            ms_points.append("bullish_continuation")
+        elif swings[i]["type"] == "LL" and swings[i-1]["type"] == "LH":
+            ms_points.append("bearish_continuation")
+    return ms_points[-3:]
+
 # -------------------------
 # 2) Trend / SR / Pullback / Divergence / Volume / Candle
 # -------------------------
@@ -222,6 +231,15 @@ def build_struct_json(symbol: str, tf: str, df: pd.DataFrame) -> Dict[str, Any]:
     pullback = detect_retest(df)
     div = detect_divergence(df)
     bo = detect_breakout(df, swings, vol_thr=1.5)
+    st_4h = build_struct_json(symbol, "4H", batch["4H"], context=batch["1D"])
+    struct["liquidity_zones"] = calc_vp(df)
+    struct["market_structure"] = classify_market_structure(swings)
+    struct["futures_sentiment"] = {
+    "funding_rate": funding_info["fundingRate"],
+    "open_interest": oi_info["openInterestAmount"]
+}
+
+
 
     # Flags BB
     flags = {
@@ -262,6 +280,8 @@ def build_struct_json(symbol: str, tf: str, df: pd.DataFrame) -> Dict[str, Any]:
             "atr14": atr,
             "volume": {"last": float(df['volume'].iloc[-1]),
                        "sma20": float(df['vol_sma20'].iloc[-1])},
+            
+
         },
         "structure": {
         "swings": swings,
@@ -284,5 +304,12 @@ def build_struct_json(symbol: str, tf: str, df: pd.DataFrame) -> Dict[str, Any]:
         "volume": volc,
         "candles": cndl
     }
+    {
+    "context_trend": {...},
+    "liquidity_zones": [...],
+    "market_structure": ["bullish_continuation", ...],
+    "futures_sentiment": {"funding_rate": 0.015, "open_interest": 123456}
+}
+    
 }
     return struct
