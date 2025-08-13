@@ -117,8 +117,8 @@ def _plot_price_panel(ax, df: pd.DataFrame, swings: List[Dict], sr_up: List[floa
     # Overlays
     xmin, xmax = df.index.min(), df.index.max()
     _scatter_swings(ax, df, swings)
-    _draw_sr(ax, sr_up or [], xmin, xmax, linestyle='--')
-    _draw_sr(ax, sr_down or [], xmin, xmax, linestyle=':')
+    _draw_sr(ax, (sr_up or [])[:4], xmin, xmax, linestyle='--')
+    _draw_sr(ax, (sr_down or [])[:4], xmin, xmax, linestyle=':')
     if lz:
         _draw_liquidity(ax, lz, xmin, xmax)
 
@@ -149,7 +149,16 @@ def _plot_rsi_panel(ax, df: pd.DataFrame):
 
 # --------------- main ---------------
 
-def render_panels_for_tf(symbol: str, tf: str, df: pd.DataFrame, out_path: Path, with_liquidity: bool):
+def render_panels_for_tf(symbol: str, tf: str, df: pd.DataFrame, out_path: Path, with_liquidity: bool, window: int = 220):
+    # Ensure datetime index & sorting
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            df.index = pd.to_datetime(df.index)
+        except Exception:
+            pass
+    df = df.sort_index()
+    if window and len(df) > window:
+        df = df.tail(window)
     # Ensure indicators
     df = enrich_more(enrich_indicators(df))
 
@@ -184,6 +193,7 @@ def main():
     ap.add_argument("--tfs", default="4H,1D", help="Comma-separated timeframes, e.g. 4H,1D")
     ap.add_argument("--limit", type=int, default=300)
     ap.add_argument("--outdir", default="out_charts")
+    ap.add_argument("--window", type=int, default=220, help="Use only last N bars per TF (zoom)")
     ap.add_argument("--with-liquidity", action="store_true")
     args = ap.parse_args()
 
@@ -192,7 +202,7 @@ def main():
 
     for tf, df in batch.items():
         out_img = Path(args.outdir) / f"{args.symbol.replace('/','')}_{tf}_panels.png"
-        render_panels_for_tf(args.symbol, tf, df, out_img, with_liquidity=args.with_liquidity)
+        render_panels_for_tf(args.symbol, tf, df, out_img, with_liquidity=args.with_liquidity, window=args.window)
         print("Saved:", out_img)
 
 if __name__ == "__main__":
