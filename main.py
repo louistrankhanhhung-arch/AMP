@@ -14,7 +14,7 @@ def main():
     args = ap.parse_args()
 
     tfs = [x.strip().upper() for x in args.tfs.split(',') if x.strip()]
-    batch = fetch_batch(args.symbol, timeframes=tfs, limit=args.limit)
+    batch = fetch_batch(symbol, timeframes=["4H", "1D"], limit=100)
 
     structs = []
     for tf, df in batch.items():
