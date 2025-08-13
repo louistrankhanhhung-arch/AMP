@@ -21,6 +21,7 @@ def main():
         df = enrich_indicators(df)
         df = enrich_more(df)
         struct = build_struct_json(args.symbol, tf, df)
+        st_4h = build_struct_json(symbol, "4H", batch["4H"], context=batch["1D"])
         structs.append(struct)
 
         # Lưu chart mỗi khung để xem nhanh
