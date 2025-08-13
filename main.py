@@ -5,8 +5,6 @@ from kucoin_api import fetch_batch
 from indicators import enrich_indicators, enrich_more, calc_vp, fetch_funding_oi
 from structure_engine import build_struct_json
 from filter import rank_all
-from chart_renderer import render_chart
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -14,7 +12,6 @@ def main():
     ap.add_argument('--symbol', default='BTC/USDT')
     ap.add_argument('--tfs', default='4H,1D', help='Comma-separated, e.g. 4H,1D')
     ap.add_argument('--limit', type=int, default=100, help='Candles per timeframe')
-    ap.add_argument('--charts', action='store_true', help='Save charts for each timeframe')
     ap.add_argument('--with-futures', action='store_true', help='Attach funding/OI from KuCoin Futures')
     ap.add_argument('--with-liquidity', action='store_true', help='Attach liquidity zones (volume profile)')
     args = ap.parse_args()
@@ -54,12 +51,7 @@ def main():
         )
         structs.append(struct)
 
-        # vẽ chart nếu bật flag
-        if args.charts:
-            out_img = f'{args.symbol.replace("/", "")}_{tf}.png'
-            render_chart(df, out_img)
-            print(f'Chart for {args.symbol} {tf} saved to', out_img)
-
+        
     # Xếp hạng & in kết quả
     ranks = rank_all(structs)
     print(json.dumps([r.__dict__ for r in ranks], ensure_ascii=False, indent=2))
