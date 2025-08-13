@@ -28,8 +28,9 @@ def _zigzag(series: pd.Series, pct: float = 2.0) -> List[Tuple[pd.Timestamp, flo
     pts.append((last_t, last_ext))
     return pts
 
-def find_swings(df: pd.DataFrame, zigzag_pct: float = 2.0):
-    zz = _zigzag(df['close'], zigzag_pct)
+def find_swings(df: pd.DataFrame, zigzag_pct: float = 2.0, window_bars: int = 250):
+    series = df['close'].tail(window_bars)
+    zz = _zigzag(series, zigzag_pct)
     out = []
     for i in range(1, len(zz)):
         prev, curr = zz[i-1][1], zz[i][1]
@@ -70,31 +71,11 @@ def detect_retest(df: pd.DataFrame) -> Dict[str, Any]:
     vol_con = (df['volume'].iloc[-5:].mean() < df['vol_sma20'].iloc[-1])
     return {"depth_pct": round(depth, 2), "to_ma_tag": tag, "vol_contraction": bool(vol_con)}
 
-
 def detect_divergence(df: pd.DataFrame) -> Dict[str, str]:
-    """
-    RSI–Price divergence (simple heuristic):
-    - bearish: price makes a new local/high vs prior window, RSI fails to make a new high
-    - bullish: price makes a new low vs prior window, RSI fails to make a new low (i.e., higher RSI low)
-    Returns one of {'bearish','bullish','none'}.
-    """
     price = df['close'].tail(30)
     rsi = df['rsi14'].tail(30)
-    if len(price) < 5 or len(rsi) < 5:
-        return {"rsi_price": "none"}
-
-    eps = 1e-9
-    p_last = float(price.iloc[-1]); r_last = float(rsi.iloc[-1])
-    p_prev_max = float(price.iloc[:-1].max()); r_prev_max = float(rsi.iloc[:-1].max())
-    p_prev_min = float(price.iloc[:-1].min()); r_prev_min = float(rsi.iloc[:-1].min())
-
-    bearish = (p_last >= p_prev_max - eps) and (r_last < r_prev_max - eps)
-    bullish = (p_last <= p_prev_min + eps) and (r_last > r_prev_min + eps)
-
-    if bearish and not bullish:
+    if price.iloc[-1] >= price.max() - 1e-9 and rsi.iloc[-1] < rsi.max() - 1e-9:
         return {"rsi_price": "bearish"}
-    if bullish and not bearish:
-        return {"rsi_price": "bullish"}
     return {"rsi_price": "none"}
 
 # -------------------------
@@ -137,8 +118,9 @@ def volume_confirmations(df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 def candle_flags(df: pd.DataFrame) -> Dict[str, bool]:
-    last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) >= 2 else last
+    # Use last CLOSED bar for pattern detection (safer in streaming environments)
+    last = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
+    prev = df.iloc[-3] if len(df) >= 3 else last
     body = float(last.get('body_pct', 0.0))
     uw   = float(last.get('upper_wick_pct', 0.0))
     lw   = float(last.get('lower_wick_pct', 0.0))
@@ -322,10 +304,18 @@ def build_struct_json(
         ctx_next_up = [lvl for lvl in sorted(ctx_sr.get("sr_up", [])) if lvl > close]
         ctx_next_dn = [lvl for lvl in sorted(ctx_sr.get("sr_down", []), reverse=True) if lvl < close]
 
+
+        # Soft nearest R/S from context
+        ctx_soft_up = [d["level"] for d in (ctx_soft.get("soft_up") or []) if isinstance(d, dict) and "level" in d]
+        ctx_soft_dn = [d["level"] for d in (ctx_soft.get("soft_down") or []) if isinstance(d, dict) and "level" in d]
+        ctx_soft_up = sorted([lvl for lvl in ctx_soft_up if lvl > close])
+        ctx_soft_dn = sorted([lvl for lvl in ctx_soft_dn if lvl < close], reverse=True)
         struct["context_guidance"] = {
             "trend_aligned": bool(align) if align is not None else None,
             "nearest_resistance": ctx_next_up[0] if ctx_next_up else None,
+            "soft_nearest_resistance": (ctx_soft_up[0] if ctx_soft_up else None),
             "nearest_support": ctx_next_dn[0] if ctx_next_dn else None,
+            "soft_nearest_support": (ctx_soft_dn[0] if ctx_soft_dn else None),
         }
 
     # Optional: liquidity zones (truyền từ ngoài để tái sử dụng/tùy biến tham số)
