@@ -1,3 +1,4 @@
+# structure_engine.py
 from typing import List, Dict, Any, Tuple, Optional
 
 import numpy as np
@@ -204,7 +205,7 @@ def eta_for_bands(close: float, bands, atr: float, tf_hours: int, coef: float = 
     return outs
 
 # -------------------------
-# 6) Build STRUCT JSON
+# 6) Build STRUCT JSON (có context/liquidity/futures sentiment)
 # -------------------------
 def build_struct_json(
     symbol: str,
@@ -284,12 +285,43 @@ def build_struct_json(
     # Optional: multi-timeframe context
     if context_df is not None:
         ctx_sw = find_swings(context_df)
-        struct["context_trend"] = detect_trend(context_df, ctx_sw)
+        ctx_trend = detect_trend(context_df, ctx_sw)
+        ctx_sr = find_sr(context_df, ctx_sw)
+        ctx_soft = soft_sr_levels(context_df)
 
-    # Optional: liquidity zones & futures sentiment do caller truyền vào
+        # Lưu vào struct
+        struct["context_trend"] = ctx_trend
+        struct["context_levels"] = {**ctx_sr, "soft_sr": ctx_soft}
+
+        # Đánh giá alignment giữa TF hiện tại và TF lớn
+        align = None
+        if trend["state"] in ("up", "down") and ctx_trend["state"] in ("up", "down"):
+            align = (trend["state"] == ctx_trend["state"])
+
+        # Nearest SR ở TF lớn so với giá hiện tại
+        ctx_next_up = [lvl for lvl in sorted(ctx_sr.get("sr_up", [])) if lvl > close]
+        ctx_next_dn = [lvl for lvl in sorted(ctx_sr.get("sr_down", []), reverse=True) if lvl < close]
+
+        struct["context_guidance"] = {
+            "trend_aligned": bool(align) if align is not None else None,
+            "nearest_resistance": ctx_next_up[0] if ctx_next_up else None,
+            "nearest_support": ctx_next_dn[0] if ctx_next_dn else None,
+        }
+
+    # Optional: liquidity zones (truyền từ ngoài để tái sử dụng/tùy biến tham số)
     if liquidity_zones is not None:
         struct["liquidity_zones"] = liquidity_zones
+
+    # Futures sentiment: nếu caller không truyền, tự gọi indicators.fetch_funding_oi(symbol)
     if futures_sentiment is not None:
         struct["futures_sentiment"] = futures_sentiment
+    else:
+        try:
+            from indicators import fetch_funding_oi
+            struct["futures_sentiment"] = fetch_funding_oi(symbol)
+        except Exception as e:
+            struct["futures_sentiment"] = {"error": str(e)}
 
     return struct
+
+    
