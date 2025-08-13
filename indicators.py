@@ -35,7 +35,18 @@ def rolling_zscore(series: pd.Series, window=20):
     mu = series.rolling(window).mean()
     sigma = series.rolling(window).std()
     return (series - mu) / sigma.replace(0, np.nan)
-    
+
+def calc_vp(df: pd.DataFrame, bins: int = 20):
+    price_bins = np.linspace(df['low'].min(), df['high'].max(), bins)
+    vol_profile = []
+    for i in range(len(price_bins)-1):
+        mask = (df['close'] >= price_bins[i]) & (df['close'] < price_bins[i+1])
+        vol_profile.append({
+            "price_range": (price_bins[i], price_bins[i+1]),
+            "volume_sum": df.loc[mask, 'volume'].sum()
+        })
+    return sorted(vol_profile, key=lambda x: -x["volume_sum"])[:5]  # top 5 zone
+
 def enrich_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out['ema20'] = ema(out['close'], 20)
