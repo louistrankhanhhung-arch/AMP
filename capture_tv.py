@@ -70,19 +70,20 @@ def make_html(exchange: str, symbol: str, interval: str, width=1280, height=720)
 </html>"""
     return html
 
-def capture_once(pw, exchange: str, symbol: str, interval: str, out_path: Path, width=1280, height=720, wait_sec=3):
+def capture_once(pw, exchange: str, symbol: str, interval: str, out_path: Path,
+                 width=1280, height=720, wait_sec=3):
     html = make_html(exchange, symbol, interval, width=width, height=height)
-    tmp = out_path.with_suffix(".html")
-    tmp.write_text(html, encoding="utf-8")
 
     browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-    page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=2)
-    page.goto(tmp.as_uri(), wait_until="load")
-    # đợi widget mount + indicators render
-    page.wait_for_selector("#root iframe", timeout=15000)
-    time.sleep(wait_sec)
-    page.screenshot(path=str(out_path), full_page=False)
-    browser.close()
+    try:
+        page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=2)
+        page.set_content(html, wait_until="load")                 # <— nạp HTML trực tiếp
+        page.wait_for_selector("#root iframe", timeout=15000)     # đợi widget render
+        time.sleep(wait_sec)                                      # đợi chỉ báo vẽ xong
+        page.screenshot(path=str(out_path), full_page=False)
+    finally:
+        browser.close()
+
 
 def main():
     ap = argparse.ArgumentParser()
