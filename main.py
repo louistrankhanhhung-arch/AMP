@@ -27,6 +27,9 @@ def main():
 
     # nếu có cả 4H và 1D, dùng 1D làm context cho 4H
     ctx_df = batch.get('1D')
+    if ctx_df is not None:
+        # Ensure context_df has indicators for detect_trend/find_sr/etc.
+        ctx_df = enrich_more(enrich_indicators(ctx_df))
 
     # optional dữ liệu bổ sung (dùng lại cho mọi tf để đỡ gọi lặp)
     futures_sent = fetch_funding_oi(args.symbol) if args.with_futures else None
