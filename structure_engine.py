@@ -70,11 +70,31 @@ def detect_retest(df: pd.DataFrame) -> Dict[str, Any]:
     vol_con = (df['volume'].iloc[-5:].mean() < df['vol_sma20'].iloc[-1])
     return {"depth_pct": round(depth, 2), "to_ma_tag": tag, "vol_contraction": bool(vol_con)}
 
+
 def detect_divergence(df: pd.DataFrame) -> Dict[str, str]:
+    """
+    RSI–Price divergence (simple heuristic):
+    - bearish: price makes a new local/high vs prior window, RSI fails to make a new high
+    - bullish: price makes a new low vs prior window, RSI fails to make a new low (i.e., higher RSI low)
+    Returns one of {'bearish','bullish','none'}.
+    """
     price = df['close'].tail(30)
     rsi = df['rsi14'].tail(30)
-    if price.iloc[-1] >= price.max() - 1e-9 and rsi.iloc[-1] < rsi.max() - 1e-9:
+    if len(price) < 5 or len(rsi) < 5:
+        return {"rsi_price": "none"}
+
+    eps = 1e-9
+    p_last = float(price.iloc[-1]); r_last = float(rsi.iloc[-1])
+    p_prev_max = float(price.iloc[:-1].max()); r_prev_max = float(rsi.iloc[:-1].max())
+    p_prev_min = float(price.iloc[:-1].min()); r_prev_min = float(rsi.iloc[:-1].min())
+
+    bearish = (p_last >= p_prev_max - eps) and (r_last < r_prev_max - eps)
+    bullish = (p_last <= p_prev_min + eps) and (r_last > r_prev_min + eps)
+
+    if bearish and not bullish:
         return {"rsi_price": "bearish"}
+    if bullish and not bearish:
+        return {"rsi_price": "bullish"}
     return {"rsi_price": "none"}
 
 # -------------------------
@@ -222,7 +242,6 @@ def build_struct_json(
     pullback = detect_retest(df)
     div = detect_divergence(df)
     bo = detect_breakout(df, swings, vol_thr=1.5)
-    bd = detect_breakdown(df, swings, vol_thr=1.5)
 
     # Flags BB
     flags = {
@@ -236,12 +255,10 @@ def build_struct_json(
 
     # Bands + ETA
     bands = cluster_levels(sr.get('sr_up', [])[:6], atr=atr, k=0.7)
-    bands_down = cluster_levels(sr.get('sr_down', [])[:6], atr=atr, k=0.7)
     coef = 1.0
     if flags["riding_upper"]: coef *= 0.7
     if flags["bb_squeeze"]:   coef *= 1.3
     eta_bands = eta_for_bands(close, bands, atr, tf_hours, coef)
-    eta_bands_down = eta_for_bands(close, bands_down, atr, tf_hours, coef)
 
     volc = volume_confirmations(df)
     soft = soft_sr_levels(df)
@@ -277,11 +294,11 @@ def build_struct_json(
             },
             "market_structure": ms_tags,
         },
-        "events": {**bo, **bd, "breakout_vol_ok": volc["breakout_vol_ok"], "breakdown_vol_ok": volc["breakdown_vol_ok"]},
+        "events": {**bo, "breakout_vol_ok": volc["breakout_vol_ok"]},
         "divergence": div,
         "levels": {**sr, "soft_sr": soft},     # SR cứng + SR mềm
-        "targets": {"up_bands": bands, "down_bands": bands_down},
-        "eta_hint": {"method": "ATR", "per": "bar", "up_bands": eta_bands, "down_bands": eta_bands_down},
+        "targets": {"up_bands": bands},
+        "eta_hint": {"method": "ATR", "per": "bar", "up_bands": eta_bands},
         "confirmations": {"volume": volc, "candles": cndl},
     }
 
@@ -328,22 +345,3 @@ def build_struct_json(
     return struct
 
     
-
-def recent_swing_low(swings: List[Dict[str, Any]]) -> Optional[float]:
-    for s in reversed(swings):
-        if s.get("type") == "LL":
-            return float(s["price"])
-    return None
-
-def detect_breakdown(df: pd.DataFrame, swings: List[Dict[str, Any]], vol_thr: float = 1.5) -> dict:
-    levels = []
-    ll = recent_swing_low(swings)
-    confirmed = False
-    if ll is not None:
-        levels.append(ll)
-        close = float(df["close"].iloc[-1])
-        vol_ratio = float(df["vol_ratio"].iloc[-1]) if "vol_ratio" in df.columns else 1.0
-        vol_z = float(df.get("vol_z20", pd.Series([0])).iloc[-1]) if "vol_z20" in df.columns else 0.0
-        vol_ok = (vol_ratio >= vol_thr) or (vol_z >= 1.0)
-        confirmed = (close < ll) and vol_ok
-    return {"breakdown_levels": levels, "last_breakdown_confirmed": confirmed}
