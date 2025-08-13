@@ -155,29 +155,39 @@ def fetch_futures_sentiment(symbol: str, futures_symbol: str = None):
     except Exception as e:
         return {"error": f"ccxt not installed: {e}"}
 
-    fut = ccxt.kucoinfutures({"enableRateLimit": True})
-    fut.load_markets()
+    try:
+        fut = ccxt.kucoinfutures({"enableRateLimit": True})
+        fut.load_markets()
+    except Exception as e:
+        return {"error": f"init kucoinfutures failed: {e}"}
 
     fsym = futures_symbol or _normalize_futures_symbol_spotlike(symbol)
+
+    # Funding rate
+    fr = None
     try:
-        fr = fut.fetch_funding_rate(fsym)  # may raise if symbol mismatch
+        fr = fut.fetch_funding_rate(fsym)
     except Exception as e:
         return {"error": f"fetch_funding_rate failed for {fsym}: {e}"}
 
-    # Open interest: ccxt support varies; try-catch
+    # Open interest (may be unavailable on some versions)
     oi = None
     try:
         oi = fut.fetch_open_interest(fsym)
     except Exception:
-        # fallback: some exchanges expose via fetch_ticker or not at all
-        pass
+        oi = None  # optional
 
     out = {
         "symbol": fsym,
-        "funding_rate": fr.get("fundingRate"),
-        "funding_timestamp": fr.get("timestamp"),
+        "funding_rate": fr.get("fundingRate") if isinstance(fr, dict) else None,
+        "funding_interval": fr.get("fundingInterval") if isinstance(fr, dict) else None,
+        "funding_timestamp": fr.get("timestamp") if isinstance(fr, dict) else None,
         "funding_info_raw": fr,
         "open_interest": (oi or {}).get("openInterestAmount") if isinstance(oi, dict) else None,
         "open_interest_raw": oi,
     }
     return out
+
+# Convenience alias (giữ tên ngắn như bạn quen dùng)
+def fetch_funding_oi(symbol: str, futures_symbol: str = None) -> dict:
+    return fetch_futures_sentiment(symbol, futures_symbol)
