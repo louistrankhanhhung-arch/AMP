@@ -1,3 +1,4 @@
+
 """
 capture_tv.py
 Headless screenshot of TradingView chart with fixed layout (EMA20/50, Bollinger, RSI, Volume)
@@ -15,8 +16,6 @@ Ví dụ (Git Bash):
 import argparse
 import time
 from pathlib import Path
-from textwrap import dedent
-
 from playwright.sync_api import sync_playwright
 
 TV_JS = "https://s3.tradingview.com/tv.js"
@@ -77,13 +76,14 @@ def capture_once(pw, exchange: str, symbol: str, interval: str, out_path: Path,
     browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
     try:
         page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=2)
-        page.set_content(html, wait_until="load")                 # <— nạp HTML trực tiếp
-        page.wait_for_selector("#root iframe", timeout=15000)     # đợi widget render
-        time.sleep(wait_sec)                                      # đợi chỉ báo vẽ xong
+        # Nạp HTML trực tiếp (tránh lỗi as_uri trên Windows paths)
+        page.set_content(html, wait_until="load")
+        # Đợi widget mount + indicators render
+        page.wait_for_selector("#root iframe", timeout=15000)
+        time.sleep(wait_sec)
         page.screenshot(path=str(out_path), full_page=False)
     finally:
         browser.close()
-
 
 def main():
     ap = argparse.ArgumentParser()
