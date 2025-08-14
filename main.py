@@ -9,6 +9,7 @@ from indicators import enrich_indicators, enrich_more, calc_vp, fetch_funding_oi
 from structure_engine import build_struct_json
 from filter import rank_all
 from universe import resolve_symbols  # <= dùng hàm chuẩn hoá danh mục mã
+from gpt_signal_builder import make_telegram_signal
 
 # ---------------------------
 # helpers
@@ -173,6 +174,17 @@ def bucketA_structs(
         "ranks": [r.__dict__ for r in rks if r.symbol in ok_syms]
     }
 
+@app.get("/gpt_signal.json")
+def gpt_signal(symbol: str, tfs: str = "4H,1D", limit: int = 300, with_futures: int = 0, with_liquidity: int = 0):
+    tflist = [x.strip().upper() for x in tfs.split(",") if x.strip()]
+    structs = build_structs_for_symbol(symbol, tflist, limit=limit, with_futures=bool(with_futures), with_liquidity=bool(with_liquidity))
+    s4 = next((s for s in structs if s.get("timeframe")=="4H"), None)
+    s1 = next((s for s in structs if s.get("timeframe")=="1D"), None)
+    if not s4 or not s1:
+        return {"ok": False, "error": "missing 4H or 1D struct"}
+
+    out = make_telegram_signal(s4, s1, trigger_1h=None)  # nếu có trigger_1H JSON, truyền vào đây
+    return out
 
 if __name__ == '__main__':
     main()
