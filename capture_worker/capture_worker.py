@@ -39,4 +39,25 @@ def main():
         except Exception as e: print("[worker] Error:", repr(e))
         time.sleep(INTERVAL_MIN * 60)
 
+# ENV mới
+RETENTION_HOURS = int(os.getenv("RETENTION_HOURS", "6"))
+
+def cleanup_old_files(dir_path, hours=6):
+    import time
+    from pathlib import Path
+    cutoff = time.time() - hours * 3600
+    p = Path(dir_path)
+    for f in p.glob("*"):
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+        except Exception:
+            pass
+
+# gọi sau mỗi lần run_once()
+def run_once():
+    ...
+    subprocess.run(args, check=False)
+    cleanup_old_files(OUT_DIR, RETENTION_HOURS)
+
 if __name__ == "__main__": main()
