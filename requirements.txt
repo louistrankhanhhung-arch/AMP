@@ -4,3 +4,5 @@ numpy>=1.26
 ccxt>=4.0.0
 requests>=2.31.0
 playwright>=1.40.0
+fastapi>=0.111
+uvicorn[standard]>=0.30
