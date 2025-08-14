@@ -70,7 +70,6 @@ def cleanup_old_files(dir_path: str, hours: int = 6):
 
 
 def run_once():
-    # Dùng 'cmd' thay vì 'args' để tránh nhầm với argparse
     cmd = [
         "python", BATCH_SCRIPT,
         "--exchange", EXCHANGE,
@@ -92,8 +91,9 @@ def run_once():
             print(f"[worker] Using SYMBOLS env: {SYMBOLS}")
             cmd.extend(["--symbols", SYMBOLS])
         else:
-            print("[worker] No STRUCTS_URL or SYMBOLS provided; skip this round.")
-            return
+            syms = ",".join(get_universe_from_env())
+            print(f"[worker] Using DEFAULT_UNIVERSE: {syms}")
+            cmd.extend(["--symbols", syms])
 
         print("[worker] Running:", " ".join(cmd))
         subprocess.run(cmd, check=False)
@@ -102,16 +102,9 @@ def run_once():
         print("[worker] Error while building/running command:")
         print(traceback.format_exc())
     finally:
-        # Housekeeping & log outputs
         cleanup_old_files(OUT_DIR, RETENTION_HOURS)
         dump_outputs(OUT_DIR)
 
-    elif SYMBOLS:
-        cmd.extend(["--symbols", SYMBOLS])
-    else:
-        syms = ",".join(get_universe_from_env())
-        print(f"[worker] Using DEFAULT_UNIVERSE: {syms}")
-        cmd.extend(["--symbols", syms])
 
 def main():
     pathlib.Path(OUT_DIR).mkdir(parents=True, exist_ok=True)
