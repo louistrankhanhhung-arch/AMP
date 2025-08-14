@@ -8,6 +8,7 @@ from kucoin_api import fetch_batch
 from indicators import enrich_indicators, enrich_more, calc_vp, fetch_funding_oi
 from structure_engine import build_struct_json
 from filter import rank_all
+from universe import get_universe_from_env
 
 # ---------------------------
 # helpers dùng chung cho CLI & API
@@ -85,70 +86,59 @@ try:
         return {"ok": True, "ts": datetime.utcnow().isoformat() + "Z"}
 
     @app.get("/structs.json")
-    def structs(
-        symbols: str = Query(..., description="vd: SUI/USDT,BTC/USDT"),
-        tfs: str = "4H,1D",
-        limit: int = 300,
-        with_futures: int = 0,
-        with_liquidity: int = 0
-    ):
+    def structs(symbols: str = "", tfs: str = "4H,1D", limit: int = 300, with_futures: int = 0, with_liquidity: int = 0):
+        syms = [s.strip() for s in symbols.split(",") if s.strip()] or get_universe_from_env()
         tflist = [x.strip().upper() for x in tfs.split(",") if x.strip()]
         out = []
-        for sym in _parse_list_csv(symbols):
+        for sym in syms:
             out.extend(build_structs_for_symbol(
                 sym, tflist, limit=limit,
                 with_futures=bool(with_futures),
                 with_liquidity=bool(with_liquidity)
             ))
-        return {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "structs": out
-        }
+        return {"generated_at": datetime.utcnow().isoformat()+"Z", "structs": out}
+
 
     @app.get("/ranks.json")
-    def ranks(
-        symbols: str = Query(..., description="vd: SUI/USDT,BTC/USDT"),
-        tfs: str = "4H,1D",
-        limit: int = 300,
-        with_futures: int = 0,
-        with_liquidity: int = 0
-    ):
+    def ranks(symbols: str = "", tfs: str = "4H,1D", limit: int = 300, with_futures: int = 0, with_liquidity: int = 0):
+        syms = [s.strip() for s in symbols.split(",") if s.strip()] or get_universe_from_env()
         tflist = [x.strip().upper() for x in tfs.split(",") if x.strip()]
         all_structs = []
-        for sym in _parse_list_csv(symbols):
+        for sym in syms:
             all_structs.extend(build_structs_for_symbol(
                 sym, tflist, limit=limit,
                 with_futures=bool(with_futures),
                 with_liquidity=bool(with_liquidity)
             ))
         rks = rank_all(all_structs)
-        return {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "ranks": [r.__dict__ for r in rks]
-        }
+        return {"generated_at": datetime.utcnow().isoformat()+"Z","ranks":[r.__dict__ for r in rks]}
+
 
     @app.get("/bucketA_structs.json")
-    def bucketA_structs(
-        symbols: str = Query(..., description="vd: SUI/USDT,BTC/USDT"),
-        tfs: str = "4H,1D",
-        limit: int = 300,
-        with_futures: int = 0,
-        with_liquidity: int = 0,
-        min_bucket: str = "A",
-        min_score: float = 7.0
-    ):
-        """
-        Trả về *chỉ* các structs của những mã đạt filter (Bucket >= min_bucket hoặc Score >= min_score).
-        Dùng cho worker: STRUCTS_URL trỏ vào endpoint này để chỉ chụp 1H/4H/1D cho shortlist.
-        """
+    def bucketA_structs(symbols: str = "", tfs: str = "4H,1D", limit: int = 300,
+                        with_futures: int = 0, with_liquidity: int = 0,
+                        min_bucket: str = "A", min_score: float = 7.0):
+        syms = [s.strip() for s in symbols.split(",") if s.strip()] or get_universe_from_env()
         tflist = [x.strip().upper() for x in tfs.split(",") if x.strip()]
         all_structs = []
-        for sym in _parse_list_csv(symbols):
+        for sym in syms:
             all_structs.extend(build_structs_for_symbol(
                 sym, tflist, limit=limit,
                 with_futures=bool(with_futures),
                 with_liquidity=bool(with_liquidity)
             ))
+        rks = rank_all(all_structs)
+        def _ord(b): return {"A":3,"B":2,"C":1}.get((b or "C").upper(),0)
+        ok_syms = set()
+        for r in rks:
+            bucket = getattr(r, "bucket_best", None) or getattr(r, "bucket", None)
+            score  = getattr(r, "score_best", None)  or getattr(r, "score", None)
+            if (bucket and _ord(bucket) >= _ord(min_bucket)) or (isinstance(score,(int,float)) and score >= float(min_score)):
+                ok_syms.add(r.symbol)
+        filtered = [s for s in all_structs if s.get("symbol") in ok_syms]
+        return {"generated_at": datetime.utcnow().isoformat()+"Z", "symbols": sorted(ok_syms),
+                "structs": filtered, "ranks": [r.__dict__ for r in rks if r.symbol in ok_syms]}
+
 
         # chọn các symbol đạt filter dựa trên 4H (rank_all dùng toàn bộ structs)
         rks = rank_all(all_structs)
