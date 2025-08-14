@@ -2,6 +2,8 @@
 from __future__ import annotations
 from typing import Dict, Any, Optional, List, Tuple
 import json, re, math
+from universe import get_precisions_map, round_levels
+
 
 # =========================
 # Helpers
@@ -241,6 +243,20 @@ def parse_plan_output(text: str) -> Dict[str, Any]:
     obj["stop"]    = _trim_float(obj["stop"])
     obj["tps"]     = [_trim_float(x) for x in obj["tps"]]
     return {"ok": True, "plan": obj}
+
+def apply_exchange_rounding(plan: dict, exchange: str = "KUCOIN") -> dict:
+    try:
+        mp = get_precisions_map(exchange, [plan["symbol"]])
+        dp = mp[plan["symbol"]]["price_dp"]
+        return round_levels(plan, dp)
+    except Exception:
+        return plan
+
+parsed = parse_plan_output(model_text)
+if parsed["ok"]:
+    plan = parsed["plan"]
+    plan = apply_exchange_rounding(plan, exchange="KUCOIN")
+    # -> lưu/hiển thị plan đã làm tròn
 
 # =========================
 # (Tuỳ chọn) tiện ích đóng gói
