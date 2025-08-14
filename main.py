@@ -1,22 +1,18 @@
 import argparse
 import json
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 # --- your modules ---
 from kucoin_api import fetch_batch
 from indicators import enrich_indicators, enrich_more, calc_vp, fetch_funding_oi
 from structure_engine import build_struct_json
 from filter import rank_all
-from universe import get_universe_from_env
-
+from universe import resolve_symbols  # <= dùng hàm chuẩn hoá danh mục mã
 
 # ---------------------------
 # helpers
 # ---------------------------
-def _csv(s: str) -> List[str]:
-    return [x.strip() for x in (s or "").split(",") if x.strip()]
-
 def _tflist(s: str) -> List[str]:
     return [x.strip().upper() for x in (s or "").split(",") if x.strip()]
 
@@ -61,7 +57,7 @@ def build_structs_for_symbol(
 
 
 # ---------------------------
-# CLI mode
+# CLI mode (chạy local nhanh)
 # ---------------------------
 def main():
     ap = argparse.ArgumentParser()
@@ -104,7 +100,7 @@ def structs(
     with_futures: int = 0,
     with_liquidity: int = 0
 ):
-    syms = _csv(symbols) or get_universe_from_env()
+    syms = resolve_symbols(symbols)                  # <= chỉ gọi resolve_symbols
     tflist = _tflist(tfs)
     out = []
     for sym in syms:
@@ -124,7 +120,7 @@ def ranks(
     with_futures: int = 0,
     with_liquidity: int = 0
 ):
-    syms = _csv(symbols) or get_universe_from_env()
+    syms = resolve_symbols(symbols)                  # <= chỉ gọi resolve_symbols
     tflist = _tflist(tfs)
     all_structs = []
     for sym in syms:
@@ -134,7 +130,8 @@ def ranks(
             with_liquidity=bool(with_liquidity)
         ))
     rks = rank_all(all_structs)
-    return {"generated_at": datetime.utcnow().isoformat()+"Z", "ranks":[r.__dict__ for r in rks]}
+    return {"generated_at": datetime.utcnow().isoformat()+"Z",
+            "ranks":[r.__dict__ for r in rks]}
 
 
 @app.get("/bucketA_structs.json")
@@ -147,7 +144,7 @@ def bucketA_structs(
     min_bucket: str = "A",
     min_score: float = 7.0
 ):
-    syms = _csv(symbols) or get_universe_from_env()
+    syms = resolve_symbols(symbols)                  # <= chỉ gọi resolve_symbols
     tflist = _tflist(tfs)
 
     all_structs = []
