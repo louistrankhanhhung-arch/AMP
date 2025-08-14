@@ -77,6 +77,15 @@ def cleanup_old_files(dir_path: str, hours: int = 6):
 
 
 def run_once():
+    # Cho phép chỉnh thời gian đọc qua biến môi trường (mặc định 180s)
+    READ_TIMEOUT = int(os.getenv("READ_TIMEOUT_SEC", "180"))
+
+    def _normalize_url(u: str) -> str:
+        u = (u or "").strip()
+        if u and not u.startswith(("http://", "https://")):
+            u = "http://" + u
+        return u
+
     cmd = [
         "python", BATCH_SCRIPT,
         "--exchange", EXCHANGE,
@@ -88,12 +97,25 @@ def run_once():
     tmp_path = None
     try:
         if STRUCTS_URL:
-            print(f"[worker] Fetching structs from {STRUCTS_URL} ...")
-            r = requests.get(STRUCTS_URL, timeout=30)
-            r.raise_for_status()
-            tmp_path = pathlib.Path("/tmp/structs.json")
-            tmp_path.write_text(r.text, encoding="utf-8")
-            cmd.extend(["--structs-json", str(tmp_path)])
+            url = _normalize_url(STRUCTS_URL)
+            print(f"[worker] Fetching structs from {url} ...")
+            try:
+                # Tách connect/read timeout: connect=5s, read=READ_TIMEOUT s
+                r = requests.get(url, timeout=(5, READ_TIMEOUT))
+                r.raise_for_status()
+            except (requests.Timeout, requests.ConnectionError, requests.RequestException) as e:
+                print(f"[worker] WARN fetch failed: {e} → fallback to SYMBOLS/DEFAULT_UNIVERSE")
+                if SYMBOLS:
+                    print(f"[worker] Using SYMBOLS env: {SYMBOLS}")
+                    cmd.extend(["--symbols", SYMBOLS])
+                else:
+                    syms = ",".join(get_universe_from_env())
+                    print(f"[worker] Using DEFAULT_UNIVERSE: {syms}")
+                    cmd.extend(["--symbols", syms])
+            else:
+                tmp_path = pathlib.Path("/tmp/structs.json")
+                tmp_path.write_text(r.text, encoding="utf-8")
+                cmd.extend(["--structs-json", str(tmp_path)])
         elif SYMBOLS:
             print(f"[worker] Using SYMBOLS env: {SYMBOLS}")
             cmd.extend(["--symbols", SYMBOLS])
