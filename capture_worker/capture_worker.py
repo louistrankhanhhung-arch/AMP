@@ -8,7 +8,14 @@ import traceback
 from datetime import datetime
 import json
 import base64
-from universe import get_universe_from_env
+
+# thay dòng: from universe import get_universe_from_env
+try:
+    from universe import get_universe_from_env
+except ModuleNotFoundError:
+    import sys, os
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # thêm /app vào sys.path
+    from universe import get_universe_from_env
 
 EXCHANGE         = os.getenv("EXCHANGE", "KUCOIN")
 CAPTURE_TFS      = os.getenv("CAPTURE_TFS", "60,240,D")
