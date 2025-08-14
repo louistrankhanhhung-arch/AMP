@@ -171,5 +171,9 @@ except Exception:
     # Nếu FastAPI không có (chạy CLI thuần), bỏ qua.
     app = None
 
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
 if __name__ == '__main__':
     main()
