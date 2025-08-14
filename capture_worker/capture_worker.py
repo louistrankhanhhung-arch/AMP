@@ -8,6 +8,7 @@ import traceback
 from datetime import datetime
 import json
 import base64
+from universe import get_universe_from_env
 
 EXCHANGE         = os.getenv("EXCHANGE", "KUCOIN")
 CAPTURE_TFS      = os.getenv("CAPTURE_TFS", "60,240,D")
@@ -105,6 +106,12 @@ def run_once():
         cleanup_old_files(OUT_DIR, RETENTION_HOURS)
         dump_outputs(OUT_DIR)
 
+    elif SYMBOLS:
+        cmd.extend(["--symbols", SYMBOLS])
+    else:
+        syms = ",".join(get_universe_from_env())
+        print(f"[worker] Using DEFAULT_UNIVERSE: {syms}")
+        cmd.extend(["--symbols", syms])
 
 def main():
     pathlib.Path(OUT_DIR).mkdir(parents=True, exist_ok=True)
