@@ -120,6 +120,7 @@ try:
                         min_bucket: str = "A", min_score: float = 7.0):
         syms = [s.strip() for s in symbols.split(",") if s.strip()] or get_universe_from_env()
         tflist = [x.strip().upper() for x in tfs.split(",") if x.strip()]
+    
         all_structs = []
         for sym in syms:
             all_structs.extend(build_structs_for_symbol(
@@ -127,7 +128,9 @@ try:
                 with_futures=bool(with_futures),
                 with_liquidity=bool(with_liquidity)
             ))
+    
         rks = rank_all(all_structs)
+    
         def _ord(b): return {"A":3,"B":2,"C":1}.get((b or "C").upper(),0)
         ok_syms = set()
         for r in rks:
@@ -135,9 +138,15 @@ try:
             score  = getattr(r, "score_best", None)  or getattr(r, "score", None)
             if (bucket and _ord(bucket) >= _ord(min_bucket)) or (isinstance(score,(int,float)) and score >= float(min_score)):
                 ok_syms.add(r.symbol)
+    
         filtered = [s for s in all_structs if s.get("symbol") in ok_syms]
-        return {"generated_at": datetime.utcnow().isoformat()+"Z", "symbols": sorted(ok_syms),
-                "structs": filtered, "ranks": [r.__dict__ for r in rks if r.symbol in ok_syms]}
+        return {
+            "generated_at": datetime.utcnow().isoformat()+"Z",
+            "symbols": sorted(ok_syms),
+            "structs": filtered,
+            "ranks": [r.__dict__ for r in rks if r.symbol in ok_syms]
+        }
+
 
 
         # chọn các symbol đạt filter dựa trên 4H (rank_all dùng toàn bộ structs)
