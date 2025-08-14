@@ -49,8 +49,8 @@ def _fmt(n: Optional[float | int], dp: int = 8) -> str:
 # ---------- universe ----------
 
 DEFAULT_UNIVERSE = [
-    "ADA/USDT","ARB/USDT","AVAX/USDT","BNB/USDT","BTC/USDT","DYDX/USDT","ETH/USDT","FET/USDT","INJ/USDT","LINK/USDT",
-    "NEAR/USDT","PENDLE/USDT","SOL/USDT","SUI/USDT","ATOM/USDT","TRX/USDT","UNI/USDT","XRP/USDT",
+    "BTC/USDT","ETH/USDT","SOL/USDT","SUI/USDT","ARB/USDT","OP/USDT","LINK/USDT",
+    "AVAX/USDT","NEAR/USDT","ATOM/USDT","DOGE/USDT","ADA/USDT","XRP/USDT","TON/USDT",
 ]
 
 def get_universe_from_env() -> List[str]:
@@ -144,4 +144,40 @@ def round_levels(plan: Dict[str, Any], price_dp: int) -> Dict[str, Any]:
     plan = dict(plan)
     if isinstance(plan.get("entries"), list):
         plan["entries"] = [r(x) for x in plan["entries"]]
-    if "stop" i
+    if "stop" in plan:
+        plan["stop"] = r(plan["stop"])
+    if isinstance(plan.get("tps"), list):
+        plan["tps"] = [r(x) for x in plan["tps"]]
+    return plan
+
+# ---------- CLI ----------
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--exchange", default="KUCOIN", help="e.g. KUCOIN, BINANCE, BYBIT, OKX")
+    ap.add_argument("--symbols", default="", help="CSV, ví dụ: BTC/USDT,SUI/USDT (mặc định lấy từ ENV SYMBOLS hoặc DEFAULT_UNIVERSE)")
+    ap.add_argument("--save", default="", help="Path lưu precisions JSON (tuỳ chọn)")
+    args = ap.parse_args()
+
+    syms = [x.strip() for x in args.symbols.split(",") if x.strip()] or get_universe_from_env()
+    mp = get_precisions_map(args.exchange, syms)
+
+    print("symbol,price_dp,amount_dp,min_qty,min_cost,tick_size,step_size")
+    for s, v in mp.items():
+        print(",".join([
+            s,
+            str(v["price_dp"]),
+            str(v["amount_dp"]),
+            _fmt(v["min_qty"]),
+            _fmt(v["min_cost"]),
+            _fmt(v["tick_size"]),
+            _fmt(v["step_size"]),
+        ]))
+
+    if args.save:
+        with open(args.save, "w", encoding="utf-8") as f:
+            json.dump(mp, f, ensure_ascii=False, indent=2)
+        print("Saved:", args.save)
+
+if __name__ == "__main__":
+    main()
