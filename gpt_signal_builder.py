@@ -252,12 +252,6 @@ def apply_exchange_rounding(plan: dict, exchange: str = "KUCOIN") -> dict:
     except Exception:
         return plan
 
-parsed = parse_plan_output(model_text)
-if parsed["ok"]:
-    plan = parsed["plan"]
-    plan = apply_exchange_rounding(plan, exchange="KUCOIN")
-    # -> lưu/hiển thị plan đã làm tròn
-
 # =========================
 # (Tuỳ chọn) tiện ích đóng gói
 # =========================
