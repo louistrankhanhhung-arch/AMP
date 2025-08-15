@@ -1,326 +1,313 @@
-# gpt_signal_builder.py
+# structure_engine.py
 from __future__ import annotations
-import os, json, re
-from typing import Any, Dict, List, Tuple, Optional
-from openai import OpenAI
+from typing import Dict, Any, Optional
+from datetime import datetime
 
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-DEFAULT_RISK_MODE = os.getenv("RISK_MODE", "conservative").lower()
+# =========================
+# Helpers
+# =========================
 
-# ---------- helpers ----------
-def parse_json_block(text: str) -> Tuple[bool, Any, str]:
+def _utcnow() -> str:
+    return datetime.utcnow().isoformat() + "Z"
+
+def _last_closed_idx(df) -> int:
+    """
+    Trả về index của nến ĐÃ ĐÓNG gần nhất.
+    - Nếu DataFrame có >= 2 hàng: dùng -2 (vì hàng cuối có thể là nến đang chạy)
+    - Nếu chỉ có 1 hàng: fallback -1 (dev/test)
+    """
+    return -2 if len(df) >= 2 else -1
+
+def _get(df, col, i, default=None, cast=float):
     try:
-        m = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.S | re.M)
-        if m:
-            return True, json.loads(m.group(1)), ""
-        start, end = text.find("{"), text.rfind("}")
-        if 0 <= start < end:
-            return True, json.loads(text[start:end+1]), ""
-        return False, None, "No JSON object found."
-    except Exception as e:
-        return False, None, f"JSON parse error: {e}"
-
-def _trim_float(x: float, ndigits: int = 6) -> float:
-    if x is None: return x
-    return float(f"{float(x):.{ndigits}f}")
-
-# ---------- schemas ----------
-CLASSIFY_SCHEMA = {
-    "type":"object",
-    "required":["symbol","side","action","confidence","reasons"],
-    "properties":{
-        "symbol":{"type":"string"},
-        "side":{"type":"string","enum":["long","short","none"]},
-        "action":{"type":"string","enum":["ENTER","WAIT","AVOID"]},
-        "confidence":{"type":"number","minimum":0,"maximum":1},
-        "reasons":{"type":"array","items":{"type":"string"},"maxItems":6},
-        "trigger_hint":{"type":"object"}
-    }
-}
-
-PLAN_SCHEMA = {
-    "type":"object",
-    "required":["symbol","side","entries","stop","tps","eta"],
-    "properties":{
-        "symbol":{"type":"string"},
-        "side":{"type":"string","enum":["long","short"]},
-        "entries":{"type":"array","items":{"type":"number"},"minItems":1,"maxItems":2},
-        "stop":{"type":"number"},
-        "tps":{"type":"array","items":{"type":"number"},"minItems":1,"maxItems":3},
-        "eta":{"type":"object"}
-    }
-}
-
-# ---------- prompts (classify/plan) ----------
-def build_messages_classify(struct_4h: Dict[str,Any], struct_1d: Dict[str,Any], trigger_1h: Optional[Dict[str,Any]]=None):
-    ctx = {"struct_4h":struct_4h,"struct_1d":struct_1d,"trigger_1h":trigger_1h or {}}
-    system = {
-        "role":"system",
-        "content":(
-            "Bạn là trader kỹ thuật. Nhiệm vụ: PHÂN LOẠI nhanh side và hành động dựa trên JSON context (4H/1D + trigger_1h). "
-            "Chỉ trả về JSON **tiếng Việt** theo schema: " + json.dumps(CLASSIFY_SCHEMA, ensure_ascii=False) +
-            "\nQuy tắc: 1D/4H đồng pha + 1H xác nhận → ENTER; mâu thuẫn/chưa rõ → WAIT; ngược mạnh → AVOID. "
-            "Trường 'reasons' là mảng 3–6 câu **tiếng Việt**, ngắn gọn, liên hệ trực tiếp các số liệu (RSI, EMA20/50, BB, swing...)."
-        )
-    }
-    user = {"role":"user","content":[
-        {"type":"text","text":"Context JSON:"},
-        {"type":"text","text":json.dumps(ctx, ensure_ascii=False)}
-    ]}
-    return [system,user]
-
-def _sl_policy_block(risk_mode: str) -> str:
-    rm = (risk_mode or DEFAULT_RISK_MODE).lower()
-    return f"""
-Chính sách SL = {rm}.
-- Nếu conservative:
-  • LONG: đặt SL **bảo thủ** để tránh wick: SL = min(đáy swing gần (4H, 5–7 nến), EMA50_4H) − 0.2×ATR14_4H (nếu có).
-  • SHORT: SL = max(đỉnh swing gần (4H, 5–7 nến), EMA50_4H) + 0.2×ATR14_4H.
-  • Thiếu dữ liệu → ưu tiên EMA50_4H và swing gần nhất; KHÔNG dùng EMA20 làm SL.
-  • SL xét theo **đóng nến 4H** để hạn chế wick.
-- Nếu neutral: dùng swing gần nhất ± 0.1×ATR14_4H.
-- Nếu aggressive: tham chiếu EMA20_4H ± 0.1×ATR14_4H.
-BẮT BUỘC tuân thủ chính sách SL ở trên; chỉ xuất **1 giá trị** 'stop' trong JSON.
-""".strip()
-
-def build_messages_plan(struct_4h: Dict[str,Any], struct_1d: Dict[str,Any], side: str, classify_reasoning: Optional[Dict[str,Any]]=None, risk_mode: Optional[str]=None):
-    ctx = {"struct_4h":struct_4h,"struct_1d":struct_1d,"decision":{"side":side,"from_classify":classify_reasoning or {}}}
-    system = {
-        "role":"system",
-        "content":(
-            "Bạn là nhà giao dịch. Hãy lập kế hoạch vào lệnh **bằng tiếng Việt**, trả duy nhất JSON theo schema: "
-            + json.dumps(PLAN_SCHEMA, ensure_ascii=False) +
-            "\nQuy tắc chung: long → stop < entries, TP tăng dần; short → stop > entries, TP giảm dần. "
-            "Tối đa 2 Entry, tối đa 3 TP. Ưu tiên mức SR/BB/đỉnh-đáy gần, tính hợp lý và an toàn. "
-            + _sl_policy_block(risk_mode or DEFAULT_RISK_MODE) +
-            "\nKhông xuất HTML, không thêm văn bản ngoài JSON."
-        )
-    }
-    user = {"role":"user","content":[
-        {"type":"text","text":"Context JSON:"},
-        {"type":"text","text":json.dumps(ctx, ensure_ascii=False)}
-    ]}
-    return [system,user]
-
-# ---------- validation ----------
-def validate_plan(plan: Dict[str,Any]) -> Tuple[bool, List[str]]:
-    errs: List[str] = []
-    side = plan.get("side")
-    entries = plan.get("entries") or []
-    tps = plan.get("tps") or []
-    stop = plan.get("stop")
-
-    if side not in ("long","short"):
-        errs.append("side must be long|short")
-    if not isinstance(entries,list) or not entries:
-        errs.append("entries must be 1-2 numbers")
-    if not isinstance(tps,list) or not tps:
-        errs.append("tps must be 1-3 numbers")
-    if not isinstance(stop,(int,float)):
-        errs.append("stop must be number")
-
-    try:
-        entries = [_trim_float(float(x)) for x in entries]
-        tps     = [_trim_float(float(x)) for x in tps]
-        stop    = _trim_float(float(stop))
+        if col in df:
+            v = df[col].iloc[i]
+            return None if v is None else cast(v)
     except Exception:
-        errs.append("entries/stop/tps must be numeric")
+        pass
+    return default
 
-    if not errs and side in ("long","short"):
-        if side=="long":
-            if not (stop < min(entries)): errs.append("For long: stop < min(entries)")
-            if any(tps[i] >= tps[i+1] for i in range(len(tps)-1)): errs.append("For long: tps strictly increasing")
-        else:
-            if not (stop > max(entries)): errs.append("For short: stop > max(entries)")
-            if any(tps[i] <= tps[i+1] for i in range(len(tps)-1)): errs.append("For short: tps strictly decreasing")
-        if any(x<=0 for x in entries+[stop]+tps): errs.append("All price levels must be > 0")
-    return (len(errs)==0), errs
+def _safe_minmax(a: float, b: float, fn=min):
+    if a is None and b is None:
+        return None
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return fn(a, b)
 
-def parse_plan_output(text: str) -> Dict[str,Any]:
-    ok, obj, err = parse_json_block(text)
-    if not ok:
-        return {"ok":False,"error":err}
-    valid, errs = validate_plan(obj)
-    if not valid:
-        return {"ok":False,"error":"; ".join(errs), "raw":obj}
-    obj["entries"] = [_trim_float(x) for x in obj["entries"]]
-    obj["stop"]    = _trim_float(obj["stop"])
-    obj["tps"]     = [_trim_float(x) for x in obj["tps"]][:3]
-    return {"ok":True, "plan":obj}
+# ---- Thời gian: chấp nhận nhiều tên cột & kiểu giá trị ----
+_TS_CANDIDATES = ("timestamp", "ts", "time", "date", "datetime")
 
-# ---------- RR & leverage ----------
-def pick_leverage(conf: float) -> str:
-    if conf >= 0.80: return "x10"
-    if conf >= 0.65: return "x5"
-    return "x3"
+def _find_ts_col(df):
+    try:
+        cols = df.columns
+    except Exception:
+        return None
+    for c in _TS_CANDIDATES:
+        if c in cols:
+            return c
+    return None
 
-def compute_rr(side: str, entries: List[float], stop: float, tps: List[float]) -> Dict[str,Any]:
-    avg_entry = sum(entries)/len(entries)
-    rr_list = []
-    for tp in tps:
-        if side=="long":
-            risk = avg_entry - stop
-            reward = tp - avg_entry
-        else:
-            risk = stop - avg_entry
-            reward = avg_entry - tp
-        rr_list.append(None if risk <= 0 else reward/risk)
+def _get_ts_ms(df, i) -> Optional[int]:
+    """
+    Lấy epoch milliseconds từ hàng i.
+    - Nếu là số: >1e12 coi là ms, ngược lại *1000.
+    - Nếu là pandas/py datetime: .timestamp()*1000
+    - Nếu không có cột thời gian: thử lấy từ index.
+    """
+    col = _find_ts_col(df)
+    v = df.index[i] if col is None else df[col].iloc[i]
+    # numeric
+    if isinstance(v, (int, float)):
+        return int(v if v > 1_000_000_000_000 else v * 1000)
+    # pandas Timestamp / datetime / string
+    try:
+        # pandas Timestamp có .value (ns)
+        if hasattr(v, "value"):  # pandas Timestamp
+            return int(v.value // 1_000_000)
+        if isinstance(v, datetime):
+            return int(v.timestamp() * 1000)
+        # string
+        from pandas import to_datetime
+        return int(to_datetime(v, utc=True).value // 1_000_000)
+    except Exception:
+        return None
+
+# =========================
+# Events & structure parts
+# =========================
+
+def candle_flags(df) -> Dict[str, Any]:
+    """
+    Phát hiện một vài mẫu nến cơ bản (PIN/ENGULF) dựa trên NẾN ĐÃ ĐÓNG.
+    """
+    if len(df) < 3:
+        return {
+            "bullish_engulf": False,
+            "bearish_engulf": False,
+            "pin_bull": False,
+            "pin_bear": False,
+        }
+
+    i = _last_closed_idx(df)            # nến đã đóng
+    prev = i - 1                        # nến trước đó (cũng đã đóng)
+    o1, h1, l1, c1 = float(df["open"].iloc[prev]), float(df["high"].iloc[prev]), float(df["low"].iloc[prev]), float(df["close"].iloc[prev])
+    o2, h2, l2, c2 = float(df["open"].iloc[i]),    float(df["high"].iloc[i]),    float(df["low"].iloc[i]),    float(df["close"].iloc[i])
+
+    # Engulf: thân nến 2 bao trùm thân nến 1
+    bull_engulf = (c2 > o2) and (c1 < o1) and (o2 <= c1) and (c2 >= o1)
+    bear_engulf = (c2 < o2) and (c1 > o1) and (o2 >= c1) and (c2 <= o1)
+
+    # Pin bar: bóng dài vượt trội
+    body2 = abs(c2 - o2)
+    upper = h2 - max(c2, o2)
+    lower = min(c2, o2) - l2
+    # tiêu chí tương đối
+    pin_bull = (lower > body2 * 2.0) and (lower > upper * 1.2)
+    pin_bear = (upper > body2 * 2.0) and (upper > lower * 1.2)
+
     return {
-        "avg_entry": avg_entry,
-        "rr_list": rr_list,
-        "rr_min": min([x for x in rr_list if x is not None], default=None),
-        "rr_max": max([x for x in rr_list if x is not None], default=None),
+        "bullish_engulf": bool(bull_engulf),
+        "bearish_engulf": bool(bear_engulf),
+        "pin_bull": bool(pin_bull),
+        "pin_bear": bool(pin_bear),
     }
 
-# ---------- rounding theo sàn (tùy chọn) ----------
-def round_by_exchange(plan: Dict[str,Any]) -> Dict[str,Any]:
-    try:
-        from universe import get_precisions_map, round_levels
-        mp = get_precisions_map("KUCOIN", [plan["symbol"]])
-        dp = mp[plan["symbol"]]["price_dp"]
-        return round_levels(plan, dp)
-    except Exception:
-        return plan
 
-# ---------- Analysis prompt (tiếng Việt, chi tiết để in Logs) ----------
-def build_messages_analysis(struct_4h: Dict[str,Any], struct_1d: Dict[str,Any], trigger_1h: Optional[Dict[str,Any]], decision: Dict[str,Any], plan: Optional[Dict[str,Any]], rr_meta: Dict[str,Any]) -> List[Dict[str,Any]]:
+def detect_trend(df, ctx_sw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Yêu cầu GPT viết phân tích chi tiết (tiếng Việt), dùng SỐ LIỆU trong JSON:
-    - Xu hướng 1D/4H (trạng thái so với EMA20/EMA50, độ dốc BB)
-    - RSI (1D/4H, nếu có)
-    - Volume vs SMA20 (nếu có)
-    - SR chính (Daily) và SR nội ngày (4H) từ context_levels.* nếu có
-    - Những vùng mỏng/thanh khoản yếu (nếu có trường liquidity)
-    - Trigger 1H: reclaim/pullback (nếu có)
-    - Kế hoạch hành động ngắn gọn (enter, quản trị sau TP1, điều kiện thoát sớm)
-    - R:R (rr_min/rr_max) & ETA (tóm tắt)
+    Trend đơn giản dựa trên EMA20/EMA50 và vị trí close — TẤT CẢ dùng nến ĐÃ ĐÓNG.
     """
-    sys = {
-        "role":"system",
-        "content":(
-            "Bạn là trợ lý giao dịch. Hãy viết phân tích **TIẾNG VIỆT**, súc tích, dựa 100% vào số liệu trong JSON. "
-            "Không nói chung chung. Nếu thiếu dữ liệu, bỏ qua mục đó."
-        )
+    i = _last_closed_idx(df)
+    ema20 = _get(df, "ema20", i)
+    ema50 = _get(df, "ema50", i)
+    close = _get(df, "close", i)
+
+    trend_up = False
+    trend_down = False
+    ema_cross_up = None
+    ema_cross_down = None
+
+    if ema20 is not None and ema50 is not None:
+        if ema20 > ema50:
+            trend_up = True
+            ema_cross_up = True
+            ema_cross_down = False
+        elif ema20 < ema50:
+            trend_down = True
+            ema_cross_up = False
+            ema_cross_down = True
+
+    if close is not None and ema20 is not None:
+        above_ema20 = close > ema20
+    else:
+        above_ema20 = None
+
+    return {
+        "trend_up": bool(trend_up),
+        "trend_down": bool(trend_down),
+        "ema20_gt_ema50": True if (ema20 is not None and ema50 is not None and ema20 > ema50) else False,
+        "above_ema20": above_ema20,
+        "ema_cross_up": ema_cross_up,
+        "ema_cross_down": ema_cross_down,
     }
-    payload = {
-        "struct_4h": struct_4h, "struct_1d": struct_1d,
-        "trigger_1h": trigger_1h or {},
-        "decision": decision or {},
-        "plan": plan or {},
-        "rr": rr_meta or {}
-    }
-    usr = {
-        "role":"user",
-        "content":(
-            "Viết phần **PHÂN TÍCH CHI TIẾT** để in Logs (không gửi Telegram). Dàn ý:\n"
-            "• Xu hướng: 1D/4H đang ở đâu so với EMA20/EMA50, BB dốc thế nào.\n"
-            "• RSI: giá trị hiện tại 1D/4H (nếu có), còn dư địa hay quá mua.\n"
-            "• Volume: so với SMA20 (nếu có) – tăng/giảm.\n"
-            "• Hỗ trợ/kháng cự: liệt kê 2–4 mức gần nhất từ context_levels (Daily & 4H) nếu có.\n"
-            "• Vùng mỏng/thanh khoản: nếu có liquidity_zones.\n"
-            "• Trigger 1H (nếu có): reclaim MA20/pullback…\n"
-            "• Kế hoạch: tóm tắt cách vào/thoát, điều kiện dời SL/thoát sớm.\n"
-            "• R:R & ETA: tóm tắt rr_min/rr_max và ETA ngắn gọn.\n"
-            "YÊU CẦU: Nêu số liệu cụ thể (ví dụ: RSI=56, Close>EMA20≈24.5). Không thêm emoji, không nhắc chuyện gửi Telegram."
-            f"\nJSON:\n{json.dumps(payload, ensure_ascii=False)}"
-        )
-    }
-    return [sys, usr]
 
-# ---------- OpenAI orchestration ----------
-def classify_and_plan(struct_4h: dict, struct_1d: dict, trigger_1h: dict|None=None, model: str|None=None, risk_mode: str|None=None) -> dict:
-    mdl = model or DEFAULT_MODEL
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    # Phase 1: classify (VN)
-    resp1 = client.chat.completions.create(model=mdl, messages=build_messages_classify(struct_4h, struct_1d, trigger_1h), temperature=0)
-    text1 = resp1.choices[0].message.content or ""
-    ok1, cls, err1 = parse_json_block(text1)
-    if not ok1:
-        return {"ok":False, "error":f"classify_parse: {err1}", "raw":text1}
-
-    action = (cls.get("action") or "").upper()
-    side   = (cls.get("side") or "").lower()
-    if action != "ENTER" or side not in ("long","short"):
-        return {"ok":True, "decision":cls}
-
-    # Phase 2: plan (VN, SL policy)
-    resp2 = client.chat.completions.create(
-        model=mdl,
-        messages=build_messages_plan(struct_4h, struct_1d, side=side, classify_reasoning=cls, risk_mode=risk_mode or DEFAULT_RISK_MODE),
-        temperature=0
-    )
-    text2 = resp2.choices[0].message.content or ""
-    parsed = parse_plan_output(text2)
-    if not parsed.get("ok"):
-        return {"ok":False, "decision":cls, "error":parsed.get("error","plan_parse_failed"), "raw":text2}
-
-    plan = round_by_exchange(parsed["plan"])
-    return {"ok":True, "decision":cls, "plan":plan}
-
-# ---------- Public API ----------
-def make_telegram_signal(struct_4h: dict, struct_1d: dict, trigger_1h: dict|None=None, model: str|None=None) -> dict:
+def detect_breakout(df, lookback: int = 20) -> Dict[str, Any]:
     """
-    Trả:
-      ok: bool
-      telegram_text: str  (text gửi Telegram, KHÔNG có 'Nhận định')
-      analysis_text: str  (chỉ để in Logs, tiếng Việt, chi tiết)
-      meta: { rr, eta, confidence, ... }
-      decision: {...}, plan: {...}
+    Xác nhận breakout/breakdown dựa trên NẾN ĐÃ ĐÓNG gần nhất.
+    - breakout: close_last > prior_high (lookback nến trước nến đã đóng)
+    - breakdown: close_last < prior_low
     """
-    out = classify_and_plan(struct_4h, struct_1d, trigger_1h, model=model, risk_mode=DEFAULT_RISK_MODE)
-    if not out.get("ok"):
-        return out
+    if len(df) < max(lookback, 3):
+        return {
+            "last_breakout_confirmed": False,
+            "last_breakout_level": None,
+            "last_breakdown_confirmed": False,
+            "last_breakdown_level": None,
+        }
 
-    decision = out.get("decision")
-    plan     = out.get("plan")
+    i = _last_closed_idx(df)
+    last_close = float(df["close"].iloc[i])
 
-    # Nếu không vào lệnh → không tạo telegram_text, nhưng vẫn có thể tạo analysis ngắn
-    if not plan:
-        analysis_text = f"[ĐÁNH GIÁ] {decision.get('symbol','?')} | {decision.get('action')} | side={decision.get('side')} | conf={decision.get('confidence')}\n- " + "; ".join((decision.get("reasons") or [])[:4])
-        return {"ok":True, "decision":decision, "telegram_text":None, "analysis_text":analysis_text, "meta":{"note":"NO-ENTER"}}
+    # cửa sổ trước nến đã đóng gần nhất
+    end = len(df) + i  # i=-2 -> end=len-2
+    start = max(0, end - lookback)
+    win = df.iloc[start:end]
 
-    symbol = plan["symbol"]
-    side   = plan["side"]
-    entries = plan["entries"]
-    stop    = plan["stop"]
-    tps     = plan["tps"]
-    eta     = plan.get("eta", {})
+    prior_high = float(win["high"].max()) if len(win) else float(df["high"].iloc[i])
+    prior_low  = float(win["low"].min())  if len(win) else float(df["low"].iloc[i])
 
-    # leverage theo confidence
-    conf = float(decision.get("confidence", 0.6) or 0.6)
-    lev  = pick_leverage(conf)
+    breakout_up  = last_close > prior_high
+    breakdown_dn = last_close < prior_low
 
-    # R:R
-    rr = compute_rr(side, entries, stop, tps)
+    return {
+        "last_breakout_confirmed": bool(breakout_up),
+        "last_breakout_level": prior_high if breakout_up else None,
+        "last_breakdown_confirmed": bool(breakdown_dn),
+        "last_breakdown_level": prior_low if breakdown_dn else None,
+    }
 
-    # telegram_text (KHÔNG có 'Nhận định')
-    def fmt(x):
-        try: return f"{float(x):.6f}".rstrip('0').rstrip('.')
-        except: return str(x)
-    direction = "LONG" if side=="long" else "SHORT"
-    lines = [f"{symbol} | {direction}"]
-    lines.append(f"Entry 1: {fmt(entries[0])}")
-    if len(entries) > 1:
-        lines.append(f"Entry 2: {fmt(entries[1])}")
-    lines.append(f"SL: {fmt(stop)}")
-    for i in range(min(3, len(tps))):
-        lines.append(f"TP{i+1}: {fmt(tps[i])}")
-    lines.append(f"Đòn bẩy: {lev}")
-    telegram_text = "\n".join(lines)
 
-    # analysis_text (tiếng Việt, đặc thù theo JSON)
-    try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        msgs = build_messages_analysis(struct_4h, struct_1d, trigger_1h, decision, plan, rr_meta={"rr_min": rr["rr_min"], "rr_max": rr["rr_max"], "eta": eta})
-        respA = client.chat.completions.create(model=DEFAULT_MODEL, messages=msgs, temperature=0.2)
-        analysis_text = (respA.choices[0].message.content or "").strip()
-    except Exception as e:
-        # fallback ngắn gọn nếu GPT lỗi
-        brief = "; ".join((decision.get("reasons") or [])[:3]) or "Xu hướng cùng pha; theo dõi phản ứng tại SR gần."
-        analysis_text = (f"{symbol} | {direction}\n"
-                         f"- Lý do: {brief}\n"
-                         f"- R:R ~ {rr.get('rr_min')}→{rr.get('rr_max')} ; ETA: {eta if eta else '—'}")
+def detect_market_structure(df, swing_lookback: int = 5) -> Dict[str, Any]:
+    """
+    Cấu trúc đỉnh-đáy cơ bản (HH/HL/LH/LL) trên NẾN ĐÃ ĐÓNG.
+    Trả nhãn gợi ý: 'bullish_continuation' | 'bearish_continuation' | 'sideway'
+    """
+    if len(df) < swing_lookback + 3:
+        return {"label": "sideway", "last_swings": []}
 
-    meta = {"confidence": conf, "eta": eta, "rr": rr, "decision": decision, "plan": plan}
-    return {"ok":True, "telegram_text": telegram_text, "analysis_text": analysis_text, "meta": meta, "decision": decision, "plan": plan}
+    i = _last_closed_idx(df)
+    ema20_now = _get(df, "ema20", i)
+    ema20_prev = _get(df, "ema20", i - 1)
+    ema50_now = _get(df, "ema50", i)
+
+    label = "sideway"
+    if (ema20_now is not None and ema50_now is not None and ema20_prev is not None):
+        if ema20_now > ema50_now and ema20_now >= ema20_prev:
+            label = "bullish_continuation"
+        elif ema20_now < ema50_now and ema20_now <= ema20_prev:
+            label = "bearish_continuation"
+
+    return {"label": label, "last_swings": []}
+
+
+def extract_context_levels(df) -> Dict[str, Any]:
+    """
+    Suy diễn vài mức SR gần (mềm) để GPT tham khảo.
+    """
+    if df is None or len(df) < 10:
+        return {"soft_support": None, "soft_resistance": None, "sr_up": None, "sr_down": None}
+
+    i = _last_closed_idx(df)
+    ema20 = _get(df, "ema20", i)
+    ema50 = _get(df, "ema50", i)
+    bb_up = _get(df, "bb_up", i)
+
+    soft_support    = _safe_minmax(ema20, ema50, min)
+    soft_resistance = _safe_minmax(bb_up, ema50, max)
+
+    # dải SR rộng hơn (tham khảo)
+    end = len(df) + i  # loại trừ nến đang chạy
+    start = max(0, end - 50)
+    win = df.iloc[start:end]
+    highN = float(win["high"].max()) if len(win) else float(df["high"].iloc[i])
+    lowN  = float(win["low"].min())  if len(win) else float(df["low"].iloc[i])
+
+    return {
+        "soft_support": soft_support,
+        "soft_resistance": soft_resistance,
+        "sr_up": (soft_resistance, highN),
+        "sr_down": (soft_support, lowN),
+    }
+
+# =========================
+# Main builder
+# =========================
+
+def build_struct_json(
+    symbol: str,
+    timeframe: str,
+    df, *,
+    context_df=None,
+    liquidity_zones: Optional[Dict[str, Any]] = None,
+    futures_sentiment: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Trả về cấu trúc JSON dùng cho filter/GPT.
+    TẤT CẢ số liệu cuối đều dựa trên NẾN ĐÃ ĐÓNG.
+    """
+    tf = timeframe.upper()
+    i  = _last_closed_idx(df)
+
+    snapshot = {
+        "ts":       _get_ts_ms(df, i),   # <-- mềm dẻo tên cột thời gian
+        "open":     float(df["open"].iloc[i]),
+        "high":     float(df["high"].iloc[i]),
+        "low":      float(df["low"].iloc[i]),
+        "close":    float(df["close"].iloc[i]),
+        "ema20":    _get(df, "ema20", i),
+        "ema50":    _get(df, "ema50", i),
+        "bb_mid":   _get(df, "bb_mid", i),
+        "bb_up":    _get(df, "bb_up", i),
+        "bb_low":   _get(df, "bb_low", i),
+        "rsi":      _get(df, "rsi", i),
+        "atr":      _get(df, "atr", i),
+        "volume":   _get(df, "volume", i),
+    }
+
+    # events (đều dựa trên nến đã đóng)
+    ev = {}
+    ev.update(candle_flags(df))
+    ev.update(detect_breakout(df))
+    ms = detect_market_structure(df)
+
+    # trend hiện tại
+    tr = detect_trend(df, ctx_sw=None)
+
+    # context levels
+    ctx_lv = extract_context_levels(context_df if (tf == "4H" and context_df is not None) else df)
+
+    # stats phụ
+    stats = {
+        "atr14": snapshot["atr"],
+        "rsi14": snapshot["rsi"],
+    }
+
+    out = {
+        "generated_at": _utcnow(),
+        "symbol": symbol,
+        "timeframe": tf,
+        "snapshot": snapshot,      # CHỐT số liệu ở nến đã đóng
+        "trend": tr,
+        "market_structure": ms,
+        "events": ev,              # CÓ: last_breakout_confirmed, last_breakdown_confirmed
+        "context_levels": ctx_lv,
+        "stats": stats,
+        "liquidity": liquidity_zones or {},
+        "futures": futures_sentiment or {},
+        # tương thích ngược (nếu đâu đó dùng 'last'):
+        "last": snapshot,
+    }
+    return out
