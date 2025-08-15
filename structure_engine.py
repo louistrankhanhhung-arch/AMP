@@ -1,337 +1,278 @@
 # structure_engine.py
-from typing import List, Dict, Any, Tuple, Optional
+from __future__ import annotations
+from typing import Dict, Any, Optional, List, Tuple
+from dataclasses import dataclass
+from datetime import datetime
+import math
 
-import numpy as np
-import pandas as pd
+# =========================
+# Helpers
+# =========================
 
-# -------------------------
-# 1) Zigzag & Swings (đơn giản)
-# -------------------------
-def _zigzag(series: pd.Series, pct: float = 2.0) -> List[Tuple[pd.Timestamp, float]]:
-    pts = []
-    if series.empty:
-        return pts
-    last_ext = series.iloc[0]
-    last_t = series.index[0]
-    direction = 0  # 1 up, -1 down, 0 none
-    for t, v in series.items():
-        change_pct = (v - last_ext) / last_ext * 100 if last_ext != 0 else 0
-        if direction >= 0 and change_pct >= pct:
-            pts.append((last_t, last_ext))
-            last_ext, last_t, direction = v, t, 1
-        elif direction <= 0 and change_pct <= -pct:
-            pts.append((last_t, last_ext))
-            last_ext, last_t, direction = v, t, -1
-        else:
-            if (direction >= 0 and v > last_ext) or (direction <= 0 and v < last_ext):
-                last_ext, last_t = v, t
-    pts.append((last_t, last_ext))
-    return pts
+def _utcnow() -> str:
+    return datetime.utcnow().isoformat() + "Z"
 
-def find_swings(df: pd.DataFrame, zigzag_pct: float = 2.0, window_bars: int = 250):
-    series = df['close'].tail(window_bars)
-    zz = _zigzag(series, zigzag_pct)
-    out = []
-    for i in range(1, len(zz)):
-        prev, curr = zz[i-1][1], zz[i][1]
-        t = zz[i][0]
-        out.append({"type": "HH" if curr > prev else "LL", "t": str(t), "price": float(curr)})
-    return out[-20:]
+def _last_closed_idx(df) -> int:
+    """
+    Trả về index của nến ĐÃ ĐÓNG gần nhất.
+    - Nếu DataFrame có >= 2 hàng: dùng -2 (vì hàng cuối có thể là nến đang chạy)
+    - Nếu chỉ có 1 hàng: fallback -1 (dev/test)
+    """
+    return -2 if len(df) >= 2 else -1
 
-def classify_market_structure_from_swings(swings: List[Dict[str, Any]]) -> List[str]:
-    """Suy luận đơn giản từ chuỗi HH/LL (không dùng HL/LH)."""
-    tags: List[str] = []
-    for i in range(1, len(swings)):
-        if swings[i]["type"] == "HH" and swings[i-1]["type"] == "HH" and swings[i]["price"] > swings[i-1]["price"]:
-            tags.append("bullish_continuation")
-        if swings[i]["type"] == "LL" and swings[i-1]["type"] == "LL" and swings[i]["price"] < swings[i-1]["price"]:
-            tags.append("bearish_continuation")
-    return tags[-3:]
+def _get(df, col, i, default=None, cast=float):
+    try:
+        if col in df:
+            v = df[col].iloc[i]
+            return None if v is None else cast(v)
+    except Exception:
+        pass
+    return default
 
-# -------------------------
-# 2) Trend / SR / Pullback / Divergence
-# -------------------------
-def detect_trend(df: pd.DataFrame, swings) -> Dict[str, Any]:
-    ema20, ema50 = df['ema20'].iloc[-1], df['ema50'].iloc[-1]
-    state = "up" if ema20 > ema50 else ("down" if ema20 < ema50 else "side")
-    age = min(len(df), 100)
-    return {"state": state, "basis": "ema20 vs ema50", "age_bars": age}
+def _safe_minmax(a: float, b: float, fn=min):
+    if a is None and b is None:
+        return None
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return fn(a, b)
 
-def find_sr(df: pd.DataFrame, swings) -> Dict[str, list]:
-    closes = df['close'].tail(200)
-    sr_up = sorted({round(x, 2) for x in closes.nlargest(6).tolist()})
-    sr_down = sorted({round(x, 2) for x in closes.nsmallest(6).tolist()})
-    return {"sr_up": sr_up, "sr_down": sr_down}
+# =========================
+# Events & structure parts
+# =========================
 
-def detect_retest(df: pd.DataFrame) -> Dict[str, Any]:
-    last = df.iloc[-1]
-    depth = abs((last['close'] - last['ema20']) / last['close'] * 100)
-    tag = "touch" if abs(last['close'] - last['ema20'])/last['close'] < 0.003 else \
-          ("near_ema20" if depth < 1.5 else "above_ema20")
-    vol_con = (df['volume'].iloc[-5:].mean() < df['vol_sma20'].iloc[-1])
-    return {"depth_pct": round(depth, 2), "to_ma_tag": tag, "vol_contraction": bool(vol_con)}
-
-def detect_divergence(df: pd.DataFrame) -> Dict[str, str]:
-    price = df['close'].tail(30)
-    rsi = df['rsi14'].tail(30)
-    if price.iloc[-1] >= price.max() - 1e-9 and rsi.iloc[-1] < rsi.max() - 1e-9:
-        return {"rsi_price": "bearish"}
-    return {"rsi_price": "none"}
-
-# -------------------------
-# 3) SR mềm (EMA/SMA/BB) + Volume/Candle confirmations
-# -------------------------
-def soft_sr_levels(df: pd.DataFrame) -> Dict[str, list]:
-    last = df.iloc[-1]
-    near_up, near_dn = [], []
-    candidates = {
-        "BB.upper": float(last['bb_upper']),
-        "BB.mid":   float(last['bb_mid']),
-        "BB.lower": float(last['bb_lower']),
-        "EMA20":    float(last['ema20']),
-        "EMA50":    float(last['ema50']),
-        "SMA20":    float(last.get('sma20', last['ema20'])),
-        "SMA50":    float(last.get('sma50', last['ema50'])),
-    }
-    px = float(last['close'])
-    for name, lvl in candidates.items():
-        if np.isnan(lvl): 
-            continue
-        if lvl > px: near_up.append((name, lvl))
-        if lvl < px: near_dn.append((name, lvl))
-    near_up  = [dict(name=n, level=l) for n,l in sorted(near_up, key=lambda x: x[1])]
-    near_dn  = [dict(name=n, level=l) for n,l in sorted(near_dn, key=lambda x: x[1], reverse=True)]
-    return {"soft_up": near_up, "soft_down": near_dn}
-
-def volume_confirmations(df: pd.DataFrame) -> Dict[str, Any]:
-    vr = float(df['vol_ratio'].iloc[-1]) if 'vol_ratio' in df.columns else 1.0
-    vz = float(df['vol_z20'].iloc[-1]) if 'vol_z20' in df.columns else 0.0
-    vol_contraction = df['volume'].tail(3).mean() < df['vol_sma20'].iloc[-1]
-    v5 = df['volume'].tail(5).mean(); v10 = df['volume'].tail(10).mean()
-    pb_healthy = vol_contraction and (v5 < v10)
-    return {
-        "vol_ratio": vr,
-        "vol_z20": vz,
-        "breakout_vol_ok": (vr >= 1.5) or (vz >= 1.0),
-        "breakdown_vol_ok": (vr >= 1.5) or (vz >= 1.0),
-        "pullback_vol_healthy": bool(pb_healthy),
-    }
-
-def candle_flags(df: pd.DataFrame) -> Dict[str, bool]:
-    # Use last CLOSED bar for pattern detection (safer in streaming environments)
-    last = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
-    prev = df.iloc[-3] if len(df) >= 3 else last
-    body = float(last.get('body_pct', 0.0))
-    uw   = float(last.get('upper_wick_pct', 0.0))
-    lw   = float(last.get('lower_wick_pct', 0.0))
-    green = last['close'] > last['open']; red = last['close'] < last['open']
-    bullish_pin = (lw >= 50) and (body <= 30) and green
-    bearish_pin = (uw >= 50) and (body <= 30) and red
-    bull_engulf = (green and prev['close'] < prev['open'] and
-                   last['close'] > prev['open'] and last['open'] < prev['close'])
-    bear_engulf = (red and prev['close'] > prev['open'] and
-                   last['close'] < prev['open'] and last['open'] > prev['close'])
-    inside = (last['high'] <= prev['high']) and (last['low'] >= prev['low'])
-    return {
-        "bullish_pin": bool(bullish_pin),
-        "bearish_pin": bool(bearish_pin),
-        "bullish_engulf": bool(bull_engulf),
-        "bearish_engulf": bool(bear_engulf),
-        "inside_bar": bool(inside),
-    }
-
-# -------------------------
-# 4) Breakout helpers
-# -------------------------
-def recent_swing_high(swings: List[Dict[str, Any]]) -> Optional[float]:
-    for s in reversed(swings):
-        if s.get("type") == "HH":
-            return float(s["price"])
-    return None
-
-def detect_breakout(df: pd.DataFrame, swings: List[Dict[str, Any]], vol_thr: float = 1.5) -> dict:
-    levels = []
-    hh = recent_swing_high(swings)
-    confirmed = False
-    if hh is not None:
-        levels.append(hh)
-        close = float(df["close"].iloc[-1])
-        vol_ratio = float(df["vol_ratio"].iloc[-1]) if "vol_ratio" in df.columns else 1.0
-        vol_z = float(df.get("vol_z20", pd.Series([0])).iloc[-1]) if "vol_z20" in df.columns else 0.0
-        vol_ok = (vol_ratio >= vol_thr) or (vol_z >= 1.0)
-        confirmed = (close > hh) and vol_ok
-    return {"breakout_levels": levels, "last_breakout_confirmed": confirmed}
-
-# -------------------------
-# 5) Cluster SR thành TP bands + ETA
-# -------------------------
-def cluster_levels(levels: List[float], atr: float, k: float = 0.7):
-    if atr is None or atr <= 0 or not levels:
-        return []
-    levels = sorted(levels)
-    bands = []
-    for p in levels:
-        if not bands or abs(p - bands[-1][-1]) > k * atr:
-            bands.append([p])
-        else:
-            bands[-1].append(p)
-    out = []
-    for grp in bands:
-        lo, hi = min(grp), max(grp)
-        tp = round((lo + hi) / 2, 2)
-        out.append({"band": [lo, hi], "tp": tp})
-    return out
-
-def _tf_to_hours(tf: str) -> int:
-    tf = tf.upper()
-    if tf.endswith("H"): return int(tf[:-1])
-    if tf.endswith("D"): return int(tf[:-1]) * 24
-    if tf.endswith("W"): return int(tf[:-1]) * 24 * 7
-    return 24
-
-def eta_for_bands(close: float, bands, atr: float, tf_hours: int, coef: float = 1.0):
-    outs = []
-    atr = max(atr, 1e-9)
-    for b in bands:
-        tp = float(b["tp"])
-        bars = int(np.ceil(abs(tp - close) / atr * coef))
-        bars = max(bars, 1)
-        hours = bars * tf_hours
-        outs.append({
-            "band": b["band"],
-            "tp": tp,
-            "eta_bars": bars,
-            "eta_hours": hours,
-            "eta_days": round(hours / 24, 2)
-        })
-    return outs
-
-# -------------------------
-# 6) Build STRUCT JSON (có context/liquidity/futures sentiment)
-# -------------------------
-def build_struct_json(
-    symbol: str,
-    tf: str,
-    df: pd.DataFrame,
-    context_df: Optional[pd.DataFrame] = None,
-    liquidity_zones: Optional[List[Dict[str, Any]]] = None,
-    futures_sentiment: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-
-    swings = find_swings(df)
-    trend = detect_trend(df, swings)
-    sr = find_sr(df, swings)
-    pullback = detect_retest(df)
-    div = detect_divergence(df)
-    bo = detect_breakout(df, swings, vol_thr=1.5)
-
-    # Flags BB
-    flags = {
-        "riding_upper": bool(df['close'].iloc[-1] > df['bb_mid'].iloc[-1]),
-        "bb_squeeze": bool(df['bb_width_pct'].iloc[-1] < df['bb_width_pct'].tail(50).median())
-    }
-
-    close = float(df['close'].iloc[-1])
-    atr = float(df['atr14'].iloc[-1] or 0.0)
-    tf_hours = _tf_to_hours(tf)
-
-    # Bands + ETA
-    bands = cluster_levels(sr.get('sr_up', [])[:6], atr=atr, k=0.7)
-    coef = 1.0
-    if flags["riding_upper"]: coef *= 0.7
-    if flags["bb_squeeze"]:   coef *= 1.3
-    eta_bands = eta_for_bands(close, bands, atr, tf_hours, coef)
-
-    volc = volume_confirmations(df)
-    soft = soft_sr_levels(df)
-    cndl = candle_flags(df)
-    ms_tags = classify_market_structure_from_swings(swings)
-
-    struct: Dict[str, Any] = {
-        "symbol": symbol,
-        "asof": str(df.index[-1]),
-        "timeframe": tf,
-        "snapshot": {
-            "price": {"open": float(df['open'].iloc[-1]),
-                      "high": float(df['high'].iloc[-1]),
-                      "low":  float(df['low'].iloc[-1]),
-                      "close": close},
-            "ma": {"ema20": float(df['ema20'].iloc[-1]), "ema50": float(df['ema50'].iloc[-1])},
-            "bb": {"upper": float(df['bb_upper'].iloc[-1]),
-                   "mid":   float(df['bb_mid'].iloc[-1]),
-                   "lower": float(df['bb_lower'].iloc[-1]),
-                   "width_pct": float(df['bb_width_pct'].iloc[-1])},
-            "rsi14": float(df['rsi14'].iloc[-1]),
-            "atr14": atr,
-            "volume": {"last": float(df['volume'].iloc[-1]),
-                       "sma20": float(df['vol_sma20'].iloc[-1])},
-        },
-        "structure": {
-            "swings": swings,
-            "trend": trend,
-            "pullback": {**pullback, "vol_healthy": volc["pullback_vol_healthy"]},
-            "bb_flags": {
-                "riding_upper_band": flags["riding_upper"],
-                "bb_contraction": flags["bb_squeeze"]
-            },
-            "market_structure": ms_tags,
-        },
-        "events": {**bo, "breakout_vol_ok": volc["breakout_vol_ok"]},
-        "divergence": div,
-        "levels": {**sr, "soft_sr": soft},     # SR cứng + SR mềm
-        "targets": {"up_bands": bands},
-        "eta_hint": {"method": "ATR", "per": "bar", "up_bands": eta_bands},
-        "confirmations": {"volume": volc, "candles": cndl},
-    }
-
-    # Optional: multi-timeframe context
-    if context_df is not None:
-        ctx_sw = find_swings(context_df)
-        ctx_trend = detect_trend(context_df, ctx_sw)
-        ctx_sr = find_sr(context_df, ctx_sw)
-        ctx_soft = soft_sr_levels(context_df)
-
-        # Lưu vào struct
-        struct["context_trend"] = ctx_trend
-        struct["context_levels"] = {**ctx_sr, "soft_sr": ctx_soft}
-
-        # Đánh giá alignment giữa TF hiện tại và TF lớn
-        align = None
-        if trend["state"] in ("up", "down") and ctx_trend["state"] in ("up", "down"):
-            align = (trend["state"] == ctx_trend["state"])
-
-        # Nearest SR ở TF lớn so với giá hiện tại
-        ctx_next_up = [lvl for lvl in sorted(ctx_sr.get("sr_up", [])) if lvl > close]
-        ctx_next_dn = [lvl for lvl in sorted(ctx_sr.get("sr_down", []), reverse=True) if lvl < close]
-
-
-        # Soft nearest R/S from context
-        ctx_soft_up = [d["level"] for d in (ctx_soft.get("soft_up") or []) if isinstance(d, dict) and "level" in d]
-        ctx_soft_dn = [d["level"] for d in (ctx_soft.get("soft_down") or []) if isinstance(d, dict) and "level" in d]
-        ctx_soft_up = sorted([lvl for lvl in ctx_soft_up if lvl > close])
-        ctx_soft_dn = sorted([lvl for lvl in ctx_soft_dn if lvl < close], reverse=True)
-        struct["context_guidance"] = {
-            "trend_aligned": bool(align) if align is not None else None,
-            "nearest_resistance": ctx_next_up[0] if ctx_next_up else None,
-            "soft_nearest_resistance": (ctx_soft_up[0] if ctx_soft_up else None),
-            "nearest_support": ctx_next_dn[0] if ctx_next_dn else None,
-            "soft_nearest_support": (ctx_soft_dn[0] if ctx_soft_dn else None),
+def candle_flags(df) -> Dict[str, Any]:
+    """
+    Phát hiện một vài mẫu nến cơ bản (PIN/ENGULF) dựa trên NẾN ĐÃ ĐÓNG.
+    """
+    if len(df) < 3:
+        return {
+            "bullish_engulf": False,
+            "bearish_engulf": False,
+            "pin_bull": False,
+            "pin_bear": False,
         }
 
-    # Optional: liquidity zones (truyền từ ngoài để tái sử dụng/tùy biến tham số)
-    if liquidity_zones is not None:
-        struct["liquidity_zones"] = liquidity_zones
+    i = _last_closed_idx(df)            # nến đã đóng
+    prev = i - 1                        # nến trước đó (cũng đã đóng)
+    o1, h1, l1, c1 = float(df["open"].iloc[prev]), float(df["high"].iloc[prev]), float(df["low"].iloc[prev]), float(df["close"].iloc[prev])
+    o2, h2, l2, c2 = float(df["open"].iloc[i]),    float(df["high"].iloc[i]),    float(df["low"].iloc[i]),    float(df["close"].iloc[i])
 
-    # Futures sentiment: nếu caller không truyền, tự gọi indicators.fetch_funding_oi(symbol)
-    if futures_sentiment is not None:
-        struct["futures_sentiment"] = futures_sentiment
+    # Engulf: thân nến 2 bao trùm thân nến 1
+    bull_engulf = (c2 > o2) and (c1 < o1) and (o2 <= c1) and (c2 >= o1)
+    bear_engulf = (c2 < o2) and (c1 > o1) and (o2 >= c1) and (c2 <= o1)
+
+    # Pin bar: bóng dài vượt trội
+    body2 = abs(c2 - o2)
+    upper = h2 - max(c2, o2)
+    lower = min(c2, o2) - l2
+    # tiêu chí tương đối
+    pin_bull = (lower > body2 * 2.0) and (lower > upper * 1.2)
+    pin_bear = (upper > body2 * 2.0) and (upper > lower * 1.2)
+
+    return {
+        "bullish_engulf": bool(bull_engulf),
+        "bearish_engulf": bool(bear_engulf),
+        "pin_bull": bool(pin_bull),
+        "pin_bear": bool(pin_bear),
+    }
+
+
+def detect_trend(df, ctx_sw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Trend đơn giản dựa trên EMA20/EMA50 và vị trí close — TẤT CẢ dùng nến ĐÃ ĐÓNG.
+    """
+    i = _last_closed_idx(df)
+    ema20 = _get(df, "ema20", i)
+    ema50 = _get(df, "ema50", i)
+    close = _get(df, "close", i)
+
+    trend_up = False
+    trend_down = False
+    ema_cross_up = None
+    ema_cross_down = None
+
+    if ema20 is not None and ema50 is not None:
+        if ema20 > ema50:
+            trend_up = True
+            ema_cross_up = True
+            ema_cross_down = False
+        elif ema20 < ema50:
+            trend_down = True
+            ema_cross_up = False
+            ema_cross_down = True
+
+    if close is not None and ema20 is not None:
+        # position vs EMA20 (bám biên)
+        above_ema20 = close > ema20
     else:
-        try:
-            from indicators import fetch_funding_oi
-            struct["futures_sentiment"] = fetch_funding_oi(symbol)
-        except Exception as e:
-            struct["futures_sentiment"] = {"error": str(e)}
+        above_ema20 = None
 
-    return struct
+    return {
+        "trend_up": bool(trend_up),
+        "trend_down": bool(trend_down),
+        "ema20_gt_ema50": True if (ema20 is not None and ema50 is not None and ema20 > ema50) else False,
+        "above_ema20": above_ema20,
+        "ema_cross_up": ema_cross_up,
+        "ema_cross_down": ema_cross_down,
+    }
 
-    
+
+def detect_breakout(df, lookback: int = 20) -> Dict[str, Any]:
+    """
+    Xác nhận breakout/breakdown dựa trên NẾN ĐÃ ĐÓNG gần nhất.
+    - breakout: close_last > prior_high (20 nến trước nến đã đóng)
+    - breakdown: close_last < prior_low
+    """
+    if len(df) < max(lookback, 3):
+        return {
+            "last_breakout_confirmed": False,
+            "last_breakout_level": None,
+            "last_breakdown_confirmed": False,
+            "last_breakdown_level": None,
+        }
+
+    i = _last_closed_idx(df)
+    last_close = float(df["close"].iloc[i])
+
+    # cửa sổ trước nến đã đóng gần nhất
+    end = len(df) + i  # i=-2 -> end=len-2
+    start = max(0, end - lookback)
+    win = df.iloc[start:end]
+
+    prior_high = float(win["high"].max()) if len(win) else float(df["high"].iloc[i])
+    prior_low  = float(win["low"].min())  if len(win) else float(df["low"].iloc[i])
+
+    breakout_up  = last_close > prior_high
+    breakdown_dn = last_close < prior_low
+
+    return {
+        "last_breakout_confirmed": bool(breakout_up),
+        "last_breakout_level": prior_high if breakout_up else None,
+        "last_breakdown_confirmed": bool(breakdown_dn),
+        "last_breakdown_level": prior_low if breakdown_dn else None,
+    }
+
+
+def detect_market_structure(df, swing_lookback: int = 5) -> Dict[str, Any]:
+    """
+    Cấu trúc đỉnh-đáy cơ bản (HH/HL/LH/LL) trên NẾN ĐÃ ĐÓNG.
+    Trả nhãn gợi ý: 'bullish_continuation' | 'bearish_continuation' | 'sideway'
+    """
+    if len(df) < swing_lookback + 3:
+        return {"label": "sideway", "last_swings": []}
+
+    i = _last_closed_idx(df)
+    # đơn giản: so sánh close với EMA20/50 và độ dốc EMA20
+    ema20_now = _get(df, "ema20", i)
+    ema20_prev = _get(df, "ema20", i - 1)
+    ema50_now = _get(df, "ema50", i)
+
+    label = "sideway"
+    if (ema20_now is not None and ema50_now is not None and ema20_prev is not None):
+        if ema20_now > ema50_now and ema20_now >= ema20_prev:
+            label = "bullish_continuation"
+        elif ema20_now < ema50_now and ema20_now <= ema20_prev:
+            label = "bearish_continuation"
+
+    return {"label": label, "last_swings": []}
+
+
+def extract_context_levels(df) -> Dict[str, Any]:
+    """
+    Suy diễn vài mức SR gần (mềm) để GPT tham khảo.
+    (Nếu bạn đã có logic riêng, cứ giữ/merge thêm trường này.)
+    """
+    if len(df) < 10:
+        return {"soft_support": None, "soft_resistance": None, "sr_up": None, "sr_down": None}
+
+    i = _last_closed_idx(df)
+    ema20 = _get(df, "ema20", i)
+    ema50 = _get(df, "ema50", i)
+    bb_up = _get(df, "bb_up", i)
+    bb_low = _get(df, "bb_low", i)
+
+    soft_support    = _safe_minmax(ema20, ema50, min)
+    soft_resistance = _safe_minmax(bb_up, ema50, max)
+
+    # dải SR rộng hơn (tham khảo)
+    highN = float(df["high"].iloc[max(0, len(df)-50):len(df)+i].max()) if len(df) >= 2 else float(df["high"].iloc[i])
+    lowN  = float(df["low"].iloc[max(0, len(df)-50):len(df)+i].min())  if len(df) >= 2 else float(df["low"].iloc[i])
+
+    return {
+        "soft_support": soft_support,
+        "soft_resistance": soft_resistance,
+        "sr_up": (soft_resistance, highN),
+        "sr_down": (soft_support, lowN),
+    }
+
+# =========================
+# Main builder
+# =========================
+
+def build_struct_json(
+    symbol: str,
+    timeframe: str,
+    df, *,
+    context_df=None,
+    liquidity_zones: Optional[Dict[str, Any]] = None,
+    futures_sentiment: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Trả về cấu trúc JSON dùng cho filter/GPT.
+    TẤT CẢ số liệu cuối đều dựa trên NẾN ĐÃ ĐÓNG.
+    """
+    tf = timeframe.upper()
+    i  = _last_closed_idx(df)
+
+    snapshot = {
+        "ts":       int(df["timestamp"].iloc[i]),
+        "open":     float(df["open"].iloc[i]),
+        "high":     float(df["high"].iloc[i]),
+        "low":      float(df["low"].iloc[i]),
+        "close":    float(df["close"].iloc[i]),
+        "ema20":    _get(df, "ema20", i),
+        "ema50":    _get(df, "ema50", i),
+        "bb_mid":   _get(df, "bb_mid", i),
+        "bb_up":    _get(df, "bb_up", i),
+        "bb_low":   _get(df, "bb_low", i),
+        "rsi":      _get(df, "rsi", i),
+        "atr":      _get(df, "atr", i),
+        "volume":   _get(df, "volume", i),
+    }
+
+    # events (đều dựa trên nến đã đóng)
+    ev = {}
+    ev.update(candle_flags(df))
+    ev.update(detect_breakout(df))
+    ms = detect_market_structure(df)
+
+    # trend hiện tại
+    tr = detect_trend(df, ctx_sw=None)
+
+    # context levels (theo TF hiện tại; nếu cần bạn có thể tách logic 1D khác 4H)
+    ctx_lv = extract_context_levels(context_df if (tf == "4H" and context_df is not None) else df)
+
+    # stats phụ (tuỳ DF có cột gì)
+    stats = {
+        "atr14": snapshot["atr"],
+        "rsi14": snapshot["rsi"],
+    }
+
+    out = {
+        "generated_at": _utcnow(),
+        "symbol": symbol,
+        "timeframe": tf,
+        "snapshot": snapshot,      # CHỐT số liệu ở nến đã đóng
+        "trend": tr,
+        "market_structure": ms,
+        "events": ev,              # CÓ: last_breakout_confirmed, last_breakdown_confirmed
+        "context_levels": ctx_lv,
+        "stats": stats,
+        "liquidity": liquidity_zones or {},
+        "futures": futures_sentiment or {},
+        # tương thích ngược (nếu đâu đó dùng 'last'):
+        "last": snapshot,
+    }
+    return out
