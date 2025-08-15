@@ -16,6 +16,8 @@ Tác giả: bạn & GPT-5 Thinking
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple
+import os                     # <-- thêm
+from pathlib import Path      # <-- thêm
 import sqlite3
 import datetime as dt
 
@@ -56,6 +58,11 @@ class DailyQuotaPolicy:
       trừ khi `ignore_quota=True`).
     """
     def __init__(self, db_path: str = "policy.sqlite3", key: str = "global"):
+        # Bảo đảm thư mục cha tồn tại (hữu ích khi trỏ vào /mnt/data trên Railway)
+        try:
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         self.db_path = db_path
         self.key = key
         self._init_db()
@@ -255,7 +262,11 @@ if __name__ == "__main__":
     bot = TeleBot(BOT_TOKEN, parse_mode=None)  # parse_mode set ở send_message
 
     # 2) Policy (mặc định 2 FREE/ngày)
-    policy = DailyQuotaPolicy(db_path=os.getenv("POLICY_DB", "policy.sqlite3"),
+    # Ưu tiên Volume trên Railway: /mnt/data/policy.sqlite3
+    # Có thể override bằng biến môi trường POLICY_DB
+    default_db_path = "/mnt/data/policy.sqlite3"
+    db_path = os.getenv("POLICY_DB", default_db_path)
+    policy = DailyQuotaPolicy(db_path=db_path,
                               key=os.getenv("POLICY_KEY", "global"))
 
     # 3) Tạo signal mẫu (thực tế lấy từ builder)
