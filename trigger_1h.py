@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-# Dùng các module sẵn có của bạn
 from kucoin_api import fetch_batch
 from indicators import enrich_indicators, enrich_more
 from structure_engine import build_struct_json
@@ -11,17 +10,40 @@ from structure_engine import build_struct_json
 def _utcnow() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
-def _drop_incomplete_last(df, tf_seconds: int) -> Any:
+# ---- Thời gian: chấp nhận nhiều tên cột & kiểu giá trị ----
+_TS_CANDIDATES = ("timestamp", "ts", "time", "date", "datetime")
+
+def _get_last_open_sec(df) -> int:
+    """
+    Trả epoch giây của thời điểm mở (hoặc mốc thời gian) hàng cuối cùng.
+    Hỗ trợ: số giây/ms, pandas Timestamp, datetime, string ISO, hoặc index thời gian.
+    """
+    col = next((c for c in _TS_CANDIDATES if c in df.columns), None)
+    v = df.index[-1] if col is None else df[col].iloc[-1]
+    # numeric
+    if isinstance(v, (int, float)):
+        return int(v // 1000) if v > 1_000_000_000_000 else int(v)
+    # pandas/py datetime/string
+    try:
+        if hasattr(v, "value"):  # pandas Timestamp ns
+            return int(v.value // 1_000_000_000)
+        if isinstance(v, datetime):
+            return int(v.timestamp())
+        from pandas import to_datetime
+        return int(to_datetime(v, utc=True).value // 1_000_000_000)
+    except Exception:
+        return 0
+
+def _drop_incomplete_last(df, tf_seconds: int):
     """
     Loại bỏ nến đang chạy ở cuối (nếu có) theo tf_seconds.
-    Giả định df['timestamp'] là epoch ms hoặc s (cứ //1000 về giây).
     """
     if df is None or len(df) == 0:
         return df
     import time
-    last = int(df["timestamp"].iloc[-1] // 1000)
+    last = _get_last_open_sec(df)
     now  = int(time.time())
-    if now < last + tf_seconds:
+    if last and now < last + tf_seconds:
         return df.iloc[:-1].copy()
     return df
 
@@ -40,7 +62,7 @@ def check_long_trigger(struct_1h: Dict[str, Any]) -> bool:
 def check_short_trigger(struct_1h: Dict[str, Any]) -> bool:
     ev   = (struct_1h.get("events") or {})
     snap = (struct_1h.get("snapshot") or {})
-    ok_breakdown = bool(ev.get("last_breakdown_confirmed", False))  # <-- dùng khóa mới từ engine
+    ok_breakdown = bool(ev.get("last_breakdown_confirmed", False))  # dùng khóa mới từ engine
     close = snap.get("close"); ema20 = snap.get("ema20"); rsi = snap.get("rsi")
     momentum_ok = (close is not None and ema20 is not None and close < ema20)
     rsi_ok = (rsi is None) or (rsi <= 50)
