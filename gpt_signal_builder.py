@@ -313,7 +313,7 @@ def make_telegram_signal(struct_4h: dict, struct_1d: dict, trigger_1h: dict|None
     try:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         msgs = build_messages_analysis(struct_4h, struct_1d, trigger_1h, decision, plan, rr_meta={"rr_min": rr["rr_min"], "rr_max": rr["rr_max"], "eta": eta})
-        respA = client.chat.completions.create(model=DEFAULT_MODEL, messages=msgs, temperature=0.1)
+        respA = client.chat.completions.create(model=DEFAULT_MODEL, messages=msgs, temperature=0.2)
         analysis_text = (respA.choices[0].message.content or "").strip()
     except Exception as e:
         # fallback ngắn gọn nếu GPT lỗi
