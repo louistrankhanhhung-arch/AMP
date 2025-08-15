@@ -320,22 +320,22 @@ def scan_once_for_logs():
                 print(f"[scan] GPT err {sym}: {out.get('error')}")
                 continue
 
-            tele = out.get("telegram_text")
-            decision = out.get("decision", {})
-            # plan = out.get("plan", {})
-
+            tele     = out.get("telegram_text")
+            decision = out.get("decision") or {}   # đảm bảo là dict
+            
             if tele:
                 print("[signal]\n" + tele)
-                # thêm dòng dưới để log phân tích chi tiết
                 if out.get("analysis_text"):
                     print("[analysis]\n" + out["analysis_text"])
                 sent += 1
             else:
-                act = ...
+                act  = str(decision.get("action") or "N/A").upper()
+                side = str(decision.get("side") or "none")
+                conf = decision.get("confidence")
                 print(f"[signal] {sym} | {act} side={side} conf={conf}")
-                # nếu muốn, cũng có thể log analysis ngắn cho WAIT/AVOID:
                 if out.get("analysis_text"):
                     print("[analysis]\n" + out["analysis_text"])
+
 
             # === META LOG (R:R, ETA, CONF) ===
             meta = out.get("meta", {})
