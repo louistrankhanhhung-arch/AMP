@@ -1,110 +1,120 @@
-# trigger_1h.py
-from __future__ import annotations
-from typing import Dict, Any, Optional
-from datetime import datetime
+from typing import Dict, Any, Tuple
 
-from kucoin_api import fetch_batch
-from indicators import enrich_indicators, enrich_more
-from structure_engine import build_struct_json
 
-def _utcnow() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+# -------------------------
+# Helpers
+# -------------------------
+def _get(d, *keys, default=None):
+    """Lấy giá trị lồng nhau trong dict, nếu không có thì trả về default."""
+    cur = d or {}
+    for k in keys:
+        if cur is None:
+            return default
+        cur = cur.get(k)
+    return default if cur is None else cur
 
-# ---- Thời gian: chấp nhận nhiều tên cột & kiểu giá trị ----
-_TS_CANDIDATES = ("timestamp", "ts", "time", "date", "datetime")
 
-def _get_last_open_sec(df) -> int:
-    """
-    Trả epoch giây của thời điểm mở (hoặc mốc thời gian) hàng cuối cùng.
-    Hỗ trợ: số giây/ms, pandas Timestamp, datetime, string ISO, hoặc index thời gian.
-    """
-    col = next((c for c in _TS_CANDIDATES if c in df.columns), None)
-    v = df.index[-1] if col is None else df[col].iloc[-1]
-    # numeric
-    if isinstance(v, (int, float)):
-        return int(v // 1000) if v > 1_000_000_000_000 else int(v)
-    # pandas/py datetime/string
+def _near(val, ref, atr, k=0.25) -> bool:
+    """Kiểm tra giá trị val có gần ref trong phạm vi k * ATR hay không."""
     try:
-        if hasattr(v, "value"):  # pandas Timestamp ns
-            return int(v.value // 1_000_000_000)
-        if isinstance(v, datetime):
-            return int(v.timestamp())
-        from pandas import to_datetime
-        return int(to_datetime(v, utc=True).value // 1_000_000_000)
+        return abs(float(val) - float(ref)) <= (k * float(atr))
     except Exception:
-        return 0
+        return False
 
-def _drop_incomplete_last(df, tf_seconds: int):
-    """
-    Loại bỏ nến đang chạy ở cuối (nếu có) theo tf_seconds.
-    """
-    if df is None or len(df) == 0:
-        return df
-    import time
-    last = _get_last_open_sec(df)
-    now  = int(time.time())
-    if last and now < last + tf_seconds:
-        return df.iloc[:-1].copy()
-    return df
 
-def _bool(x) -> Optional[bool]:
-    return None if x is None else bool(x)
+def _candles_any(candles: Dict[str, bool], keys) -> bool:
+    """Kiểm tra xem candles có chứa ít nhất một mẫu nến trong keys hay không."""
+    if not isinstance(candles, dict):
+        return False
+    return any(bool(candles.get(k)) for k in keys)
 
-def check_long_trigger(struct_1h: Dict[str, Any]) -> bool:
-    ev   = (struct_1h.get("events") or {})
-    snap = (struct_1h.get("snapshot") or {})
-    ok_breakout = bool(ev.get("last_breakout_confirmed", False))
-    close = snap.get("close"); ema20 = snap.get("ema20"); rsi = snap.get("rsi")
-    momentum_ok = (close is not None and ema20 is not None and close > ema20)
-    rsi_ok = (rsi is None) or (rsi >= 50)
-    return bool(ok_breakout and momentum_ok and rsi_ok)
 
-def check_short_trigger(struct_1h: Dict[str, Any]) -> bool:
-    ev   = (struct_1h.get("events") or {})
-    snap = (struct_1h.get("snapshot") or {})
-    ok_breakdown = bool(ev.get("last_breakdown_confirmed", False))  # dùng khóa mới từ engine
-    close = snap.get("close"); ema20 = snap.get("ema20"); rsi = snap.get("rsi")
-    momentum_ok = (close is not None and ema20 is not None and close < ema20)
-    rsi_ok = (rsi is None) or (rsi <= 50)
-    return bool(ok_breakdown and momentum_ok and rsi_ok)
+def _common_vals(s: Dict) -> Tuple[float, float, float, float]:
+    """Trích xuất giá close, EMA20, RSI14, ATR14 từ snapshot."""
+    close = float(_get(s, "snapshot", "price", "close", default=0.0) or 0.0)
+    ema20 = float(_get(s, "snapshot", "ema20", default=0.0) or 0.0)
+    rsi14 = float(_get(s, "snapshot", "rsi14", default=50.0) or 50.0)
+    atr14 = float(_get(s, "snapshot", "atr14", default=0.0) or 0.0)
+    return close, ema20, rsi14, atr14
 
-def build_trigger_for_symbol(symbol: str, limit: int = 180) -> Dict[str, Any]:
-    """
-    Fetch 1H cho 1 mã, dùng NẾN ĐÃ ĐÓNG, build struct 1H, và suy ra trigger.
-    Trả về dict đơn giản để feed GPT (hoặc dùng trong scheduler).
-    """
-    # 1) fetch & ensure closed bars
-    batch = fetch_batch(symbol, timeframes=["1H"], limit=limit)
-    df = batch.get("1H")
-    if df is None or len(df) == 0:
-        return {"symbol": symbol, "timeframe": "1H", "ok": False, "error": "no_ohlcv"}
 
-    df = _drop_incomplete_last(df, tf_seconds=3600)
-    if df is None or len(df) == 0:
-        return {"symbol": symbol, "timeframe": "1H", "ok": False, "error": "no_closed_bar"}
+# -------------------------
+# Long Trigger
+# -------------------------
+def check_long_trigger(s1h: Dict) -> Dict[str, Any]:
+    close, ema20, rsi14, atr = _common_vals(s1h)
+    events = _get(s1h, "events", default={}) or {}
+    pb = _get(s1h, "structure", "pullback", default={}) or {}
+    vol = _get(s1h, "confirmations", "volume", default={}) or {}
+    candles = _get(s1h, "confirmations", "candles", default={}) or {}
 
-    # 2) enrich indicators
-    df = enrich_more(enrich_indicators(df))
+    # Breakout xác nhận
+    if bool(events.get("last_breakout_confirmed")):
+        return {"ok": True, "type": "breakout", "reasons": ["last_breakout_confirmed=1"]}
 
-    # 3) build struct 1H bằng engine (engine đã dùng nến đóng)
-    s1h = build_struct_json(symbol, "1H", df)
+    # Reclaim EMA20
+    reclaim = (
+        pb.get("to_ma_tag") in ("touch", "near_ema20")
+        and (close >= ema20)
+        and (rsi14 > 50)
+        and bool(vol.get("pullback_vol_healthy"))
+    )
+    if reclaim:
+        return {
+            "ok": True,
+            "type": "reclaim",
+            "reasons": ["to_ma_tag_ok", "close>=ema20", "rsi>50", "pullback_vol_healthy"],
+        }
 
-    # 4) derive triggers
-    long_trig  = check_long_trigger(s1h)
-    short_trig = check_short_trigger(s1h)
+    # Retest EMA20
+    rej_candle = _candles_any(candles, ["bullish_engulfing", "pin_bar_bull"])
+    retest = rej_candle and _near(close, ema20, atr, k=0.25) and bool(vol.get("pullback_vol_healthy"))
+    if retest:
+        return {
+            "ok": True,
+            "type": "retest",
+            "reasons": ["bullish_reject", "near_ema20", "pullback_vol_healthy"],
+        }
 
-    # 5) Một số flag gợi ý thêm
-    snap = s1h.get("snapshot", {})
-    trig = {
-        "symbol": symbol,
-        "timeframe": "1H",
-        "ok": True,
-        "reclaim_ma20": _bool(snap.get("close") is not None and snap.get("ema20") is not None and snap["close"] > snap["ema20"]),
-        "rsi_gt_50": _bool((snap.get("rsi") or 0) > 50),
-        "last_breakout_confirmed": bool((s1h.get("events") or {}).get("last_breakout_confirmed", False)),
-        "last_breakdown_confirmed": bool((s1h.get("events") or {}).get("last_breakdown_confirmed", False)),
-        "long_trigger": bool(long_trig),
-        "short_trigger": bool(short_trig),
-        "note": "trigger-1H based on closed bars",
-    }
-    return trig
+    return {"ok": False, "type": None, "reasons": []}
+
+
+# -------------------------
+# Short Trigger
+# -------------------------
+def check_short_trigger(s1h: Dict) -> Dict[str, Any]:
+    close, ema20, rsi14, atr = _common_vals(s1h)
+    events = _get(s1h, "events", default={}) or {}
+    pb = _get(s1h, "structure", "pullback", default={}) or {}
+    vol = _get(s1h, "confirmations", "volume", default={}) or {}
+    candles = _get(s1h, "confirmations", "candles", default={}) or {}
+
+    # Breakdown xác nhận
+    if bool(events.get("last_breakdown_confirmed")):
+        return {"ok": True, "type": "breakdown", "reasons": ["last_breakdown_confirmed=1"]}
+
+    # Reclaim xuống EMA20
+    reclaim_down = (
+        pb.get("to_ma_tag") in ("touch", "near_ema20")
+        and (close <= ema20)
+        and (rsi14 < 50)
+        and bool(vol.get("pullback_vol_healthy"))
+    )
+    if reclaim_down:
+        return {
+            "ok": True,
+            "type": "reclaim_down",
+            "reasons": ["to_ma_tag_ok", "close<=ema20", "rsi<50", "pullback_vol_healthy"],
+        }
+
+    # Retest EMA20 xuống
+    rej_candle = _candles_any(candles, ["bearish_engulfing", "pin_bar_bear"])
+    retest = rej_candle and _near(close, ema20, atr, k=0.25) and bool(vol.get("pullback_vol_healthy"))
+    if retest:
+        return {
+            "ok": True,
+            "type": "retest_down",
+            "reasons": ["bearish_reject", "near_ema20", "pullback_vol_healthy"],
+        }
+
+    return {"ok": False, "type": None, "reasons": []}
