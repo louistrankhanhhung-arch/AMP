@@ -1,313 +1,177 @@
-# structure_engine.py
+# gpt_signal_builder.py
 from __future__ import annotations
-from typing import Dict, Any, Optional
-from datetime import datetime
+import os
+from typing import Any, Dict, List, Optional, Union
 
-# =========================
-# Helpers
-# =========================
+from openai import OpenAI  # bắt buộc dùng OpenAI >= 1.x
 
-def _utcnow() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+# ========== Helpers ==========
 
-def _last_closed_idx(df) -> int:
-    """
-    Trả về index của nến ĐÃ ĐÓNG gần nhất.
-    - Nếu DataFrame có >= 2 hàng: dùng -2 (vì hàng cuối có thể là nến đang chạy)
-    - Nếu chỉ có 1 hàng: fallback -1 (dev/test)
-    """
-    return -2 if len(df) >= 2 else -1
-
-def _get(df, col, i, default=None, cast=float):
+def _fmt_price(x: Optional[float]) -> str:
+    if x is None:
+        return "-"
     try:
-        if col in df:
-            v = df[col].iloc[i]
-            return None if v is None else cast(v)
+        x = float(x)
     except Exception:
-        pass
-    return default
+        return str(x)
+    if x >= 100:
+        return f"{x:.2f}"
+    if x >= 10:
+        return f"{x:.3f}"
+    if x >= 1:
+        return f"{x:.4f}"
+    return f"{x:.6f}"
 
-def _safe_minmax(a: float, b: float, fn=min):
-    if a is None and b is None:
-        return None
-    if a is None:
-        return b
-    if b is None:
-        return a
-    return fn(a, b)
+def _pick(v, default=None):
+    return default if v is None else v
 
-# ---- Thời gian: chấp nhận nhiều tên cột & kiểu giá trị ----
-_TS_CANDIDATES = ("timestamp", "ts", "time", "date", "datetime")
-
-def _find_ts_col(df):
-    try:
-        cols = df.columns
-    except Exception:
-        return None
-    for c in _TS_CANDIDATES:
-        if c in cols:
-            return c
-    return None
-
-def _get_ts_ms(df, i) -> Optional[int]:
+def _ensure_candidate_from_args(first: Union[dict, str, None], **kwargs) -> Dict[str, Any]:
     """
-    Lấy epoch milliseconds từ hàng i.
-    - Nếu là số: >1e12 coi là ms, ngược lại *1000.
-    - Nếu là pandas/py datetime: .timestamp()*1000
-    - Nếu không có cột thời gian: thử lấy từ index.
+    Hỗ trợ 2 cách gọi:
+      - make_telegram_signal(candidate_dict)
+      - make_telegram_signal(symbol="AVAX/USDT", side="LONG", entries=[...], sl=..., tps=[...], leverage="x5")
     """
-    col = _find_ts_col(df)
-    v = df.index[i] if col is None else df[col].iloc[i]
-    # numeric
-    if isinstance(v, (int, float)):
-        return int(v if v > 1_000_000_000_000 else v * 1000)
-    # pandas Timestamp / datetime / string
-    try:
-        # pandas Timestamp có .value (ns)
-        if hasattr(v, "value"):  # pandas Timestamp
-            return int(v.value // 1_000_000)
-        if isinstance(v, datetime):
-            return int(v.timestamp() * 1000)
-        # string
-        from pandas import to_datetime
-        return int(to_datetime(v, utc=True).value // 1_000_000)
-    except Exception:
-        return None
+    if isinstance(first, dict):
+        return first
+    c: Dict[str, Any] = {}
+    if isinstance(first, str):
+        c["symbol"] = first
+    c["symbol"]   = _pick(c.get("symbol"), kwargs.get("symbol"))
+    c["side"]     = kwargs.get("side") or kwargs.get("direction")
+    c["entries"]  = kwargs.get("entries") or kwargs.get("entry") or kwargs.get("entry_prices")
+    if c["entries"] is None:
+        e1 = kwargs.get("entry1"); e2 = kwargs.get("entry2")
+        c["entries"] = [e for e in (e1, e2) if e is not None]
+    c["sl"]       = kwargs.get("sl") or kwargs.get("stop") or kwargs.get("stop_loss")
+    c["tps"]      = kwargs.get("tps") or [kwargs.get("tp1"), kwargs.get("tp2"), kwargs.get("tp3")]
+    c["leverage"] = kwargs.get("leverage") or kwargs.get("lev")
+    c["meta"]     = kwargs.get("meta") or {}
+    return c
 
-# =========================
-# Events & structure parts
-# =========================
+def _require_openai_client() -> OpenAI:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+    return OpenAI(api_key=api_key)
 
-def candle_flags(df) -> Dict[str, Any]:
+# ========== Public API ==========
+
+def make_telegram_signal(candidate_or_symbol: Union[Dict[str, Any], str], **kwargs) -> str:
     """
-    Phát hiện một vài mẫu nến cơ bản (PIN/ENGULF) dựa trên NẾN ĐÃ ĐÓNG.
+    Tạo text gửi Telegram (KHÔNG có 'Nhận định').
     """
-    if len(df) < 3:
-        return {
-            "bullish_engulf": False,
-            "bearish_engulf": False,
-            "pin_bull": False,
-            "pin_bear": False,
-        }
+    c = _ensure_candidate_from_args(candidate_or_symbol, **kwargs)
 
-    i = _last_closed_idx(df)            # nến đã đóng
-    prev = i - 1                        # nến trước đó (cũng đã đóng)
-    o1, h1, l1, c1 = float(df["open"].iloc[prev]), float(df["high"].iloc[prev]), float(df["low"].iloc[prev]), float(df["close"].iloc[prev])
-    o2, h2, l2, c2 = float(df["open"].iloc[i]),    float(df["high"].iloc[i]),    float(df["low"].iloc[i]),    float(df["close"].iloc[i])
+    sym   = c.get("symbol", "UNKNOWN")
+    side  = (c.get("side") or "WAIT").upper()
+    ent   = c.get("entries") or []
+    sl    = c.get("sl")
+    tps   = [tp for tp in (c.get("tps") or []) if tp is not None]
+    lev   = c.get("leverage")
 
-    # Engulf: thân nến 2 bao trùm thân nến 1
-    bull_engulf = (c2 > o2) and (c1 < o1) and (o2 <= c1) and (c2 >= o1)
-    bear_engulf = (c2 < o2) and (c1 > o1) and (o2 >= c1) and (c2 <= o1)
-
-    # Pin bar: bóng dài vượt trội
-    body2 = abs(c2 - o2)
-    upper = h2 - max(c2, o2)
-    lower = min(c2, o2) - l2
-    # tiêu chí tương đối
-    pin_bull = (lower > body2 * 2.0) and (lower > upper * 1.2)
-    pin_bear = (upper > body2 * 2.0) and (upper > lower * 1.2)
-
-    return {
-        "bullish_engulf": bool(bull_engulf),
-        "bearish_engulf": bool(bear_engulf),
-        "pin_bull": bool(pin_bull),
-        "pin_bear": bool(pin_bear),
-    }
+    lines: List[str] = []
+    lines.append(f"{sym} | {side}")
+    if len(ent) >= 1: lines.append(f"Entry 1: {_fmt_price(ent[0])}")
+    if len(ent) >= 2: lines.append(f"Entry 2: {_fmt_price(ent[1])}")
+    if sl is not None: lines.append(f"SL: {_fmt_price(sl)}")
+    if len(tps) >= 1: lines.append(f"TP1: {_fmt_price(tps[0])}")
+    if len(tps) >= 2: lines.append(f"TP2: {_fmt_price(tps[1])}")
+    if len(tps) >= 3: lines.append(f"TP3: {_fmt_price(tps[2])}")
+    if lev:
+        lev_str = str(lev)
+        if isinstance(lev, (int, float)):
+            lev_str = f"x{int(lev)}"
+        elif not lev_str.startswith("x"):
+            lev_str = f"x{lev_str}"
+        lines.append(f"Đòn bẩy: {lev_str}")
+    return "\n".join(lines)
 
 
-def detect_trend(df, ctx_sw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    Trend đơn giản dựa trên EMA20/EMA50 và vị trí close — TẤT CẢ dùng nến ĐÃ ĐÓNG.
-    """
-    i = _last_closed_idx(df)
-    ema20 = _get(df, "ema20", i)
-    ema50 = _get(df, "ema50", i)
-    close = _get(df, "close", i)
-
-    trend_up = False
-    trend_down = False
-    ema_cross_up = None
-    ema_cross_down = None
-
-    if ema20 is not None and ema50 is not None:
-        if ema20 > ema50:
-            trend_up = True
-            ema_cross_up = True
-            ema_cross_down = False
-        elif ema20 < ema50:
-            trend_down = True
-            ema_cross_up = False
-            ema_cross_down = True
-
-    if close is not None and ema20 is not None:
-        above_ema20 = close > ema20
-    else:
-        above_ema20 = None
-
-    return {
-        "trend_up": bool(trend_up),
-        "trend_down": bool(trend_down),
-        "ema20_gt_ema50": True if (ema20 is not None and ema50 is not None and ema20 > ema50) else False,
-        "above_ema20": above_ema20,
-        "ema_cross_up": ema_cross_up,
-        "ema_cross_down": ema_cross_down,
-    }
-
-
-def detect_breakout(df, lookback: int = 20) -> Dict[str, Any]:
-    """
-    Xác nhận breakout/breakdown dựa trên NẾN ĐÃ ĐÓNG gần nhất.
-    - breakout: close_last > prior_high (lookback nến trước nến đã đóng)
-    - breakdown: close_last < prior_low
-    """
-    if len(df) < max(lookback, 3):
-        return {
-            "last_breakout_confirmed": False,
-            "last_breakout_level": None,
-            "last_breakdown_confirmed": False,
-            "last_breakdown_level": None,
-        }
-
-    i = _last_closed_idx(df)
-    last_close = float(df["close"].iloc[i])
-
-    # cửa sổ trước nến đã đóng gần nhất
-    end = len(df) + i  # i=-2 -> end=len-2
-    start = max(0, end - lookback)
-    win = df.iloc[start:end]
-
-    prior_high = float(win["high"].max()) if len(win) else float(df["high"].iloc[i])
-    prior_low  = float(win["low"].min())  if len(win) else float(df["low"].iloc[i])
-
-    breakout_up  = last_close > prior_high
-    breakdown_dn = last_close < prior_low
-
-    return {
-        "last_breakout_confirmed": bool(breakout_up),
-        "last_breakout_level": prior_high if breakout_up else None,
-        "last_breakdown_confirmed": bool(breakdown_dn),
-        "last_breakdown_level": prior_low if breakdown_dn else None,
-    }
-
-
-def detect_market_structure(df, swing_lookback: int = 5) -> Dict[str, Any]:
-    """
-    Cấu trúc đỉnh-đáy cơ bản (HH/HL/LH/LL) trên NẾN ĐÃ ĐÓNG.
-    Trả nhãn gợi ý: 'bullish_continuation' | 'bearish_continuation' | 'sideway'
-    """
-    if len(df) < swing_lookback + 3:
-        return {"label": "sideway", "last_swings": []}
-
-    i = _last_closed_idx(df)
-    ema20_now = _get(df, "ema20", i)
-    ema20_prev = _get(df, "ema20", i - 1)
-    ema50_now = _get(df, "ema50", i)
-
-    label = "sideway"
-    if (ema20_now is not None and ema50_now is not None and ema20_prev is not None):
-        if ema20_now > ema50_now and ema20_now >= ema20_prev:
-            label = "bullish_continuation"
-        elif ema20_now < ema50_now and ema20_now <= ema20_prev:
-            label = "bearish_continuation"
-
-    return {"label": label, "last_swings": []}
-
-
-def extract_context_levels(df) -> Dict[str, Any]:
-    """
-    Suy diễn vài mức SR gần (mềm) để GPT tham khảo.
-    """
-    if df is None or len(df) < 10:
-        return {"soft_support": None, "soft_resistance": None, "sr_up": None, "sr_down": None}
-
-    i = _last_closed_idx(df)
-    ema20 = _get(df, "ema20", i)
-    ema50 = _get(df, "ema50", i)
-    bb_up = _get(df, "bb_up", i)
-
-    soft_support    = _safe_minmax(ema20, ema50, min)
-    soft_resistance = _safe_minmax(bb_up, ema50, max)
-
-    # dải SR rộng hơn (tham khảo)
-    end = len(df) + i  # loại trừ nến đang chạy
-    start = max(0, end - 50)
-    win = df.iloc[start:end]
-    highN = float(win["high"].max()) if len(win) else float(df["high"].iloc[i])
-    lowN  = float(win["low"].min())  if len(win) else float(df["low"].iloc[i])
-
-    return {
-        "soft_support": soft_support,
-        "soft_resistance": soft_resistance,
-        "sr_up": (soft_resistance, highN),
-        "sr_down": (soft_support, lowN),
-    }
-
-# =========================
-# Main builder
-# =========================
-
-def build_struct_json(
+def make_analysis_log(
     symbol: str,
-    timeframe: str,
-    df, *,
-    context_df=None,
-    liquidity_zones: Optional[Dict[str, Any]] = None,
-    futures_sentiment: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
+    *,
+    structs: Dict[str, Any],
+    decision: Dict[str, Any],
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+) -> str:
     """
-    Trả về cấu trúc JSON dùng cho filter/GPT.
-    TẤT CẢ số liệu cuối đều dựa trên NẾN ĐÃ ĐÓNG.
+    Sinh 'Nhận định' THUẦN VIỆT bắt buộc qua OpenAI — để LƯU LOG nội bộ (không gửi Telegram).
+    - symbol: "AVAX/USDT"
+    - structs: dict chứa 1H/4H/1D (đã build từ engine; snapshot/trend/events/context_levels...)
+    - decision: dict signal (side, entries, sl, tps, rr, eta...)
     """
-    tf = timeframe.upper()
-    i  = _last_closed_idx(df)
+    try:
+        client = _require_openai_client()
+    except Exception as e:
+        return f"[gpt-error] {e}"
 
-    snapshot = {
-        "ts":       _get_ts_ms(df, i),   # <-- mềm dẻo tên cột thời gian
-        "open":     float(df["open"].iloc[i]),
-        "high":     float(df["high"].iloc[i]),
-        "low":      float(df["low"].iloc[i]),
-        "close":    float(df["close"].iloc[i]),
-        "ema20":    _get(df, "ema20", i),
-        "ema50":    _get(df, "ema50", i),
-        "bb_mid":   _get(df, "bb_mid", i),
-        "bb_up":    _get(df, "bb_up", i),
-        "bb_low":   _get(df, "bb_low", i),
-        "rsi":      _get(df, "rsi", i),
-        "atr":      _get(df, "atr", i),
-        "volume":   _get(df, "volume", i),
-    }
+    mdl = model or os.getenv("OPENAI_MODEL") or "gpt-4o"
+    temp = float(os.getenv("OPENAI_TEMPERATURE", "0.2")) if temperature is None else float(temperature)
 
-    # events (đều dựa trên nến đã đóng)
-    ev = {}
-    ev.update(candle_flags(df))
-    ev.update(detect_breakout(df))
-    ms = detect_market_structure(df)
+    # Rút gọn dữ liệu gửi GPT (đủ ý, tránh thừa token)
+    def _core(s: Dict[str, Any]) -> Dict[str, Any]:
+        if not s: return {}
+        snap = s.get("snapshot", {})
+        return {
+            "timeframe": s.get("timeframe"),
+            "close": snap.get("close"),
+            "ema20": snap.get("ema20"),
+            "ema50": snap.get("ema50"),
+            "bb_up": snap.get("bb_up"),
+            "bb_low": snap.get("bb_low"),
+            "rsi": snap.get("rsi"),
+            "atr": snap.get("atr"),
+            "trend": s.get("trend"),
+            "events": s.get("events"),
+            "context_levels": s.get("context_levels"),
+            "market_structure": s.get("market_structure"),
+            "stats": s.get("stats"),
+        }
 
-    # trend hiện tại
-    tr = detect_trend(df, ctx_sw=None)
-
-    # context levels
-    ctx_lv = extract_context_levels(context_df if (tf == "4H" and context_df is not None) else df)
-
-    # stats phụ
-    stats = {
-        "atr14": snapshot["atr"],
-        "rsi14": snapshot["rsi"],
-    }
-
-    out = {
-        "generated_at": _utcnow(),
+    payload = {
         "symbol": symbol,
-        "timeframe": tf,
-        "snapshot": snapshot,      # CHỐT số liệu ở nến đã đóng
-        "trend": tr,
-        "market_structure": ms,
-        "events": ev,              # CÓ: last_breakout_confirmed, last_breakdown_confirmed
-        "context_levels": ctx_lv,
-        "stats": stats,
-        "liquidity": liquidity_zones or {},
-        "futures": futures_sentiment or {},
-        # tương thích ngược (nếu đâu đó dùng 'last'):
-        "last": snapshot,
+        "tf_1H": _core(structs.get("1H", {})),
+        "tf_4H": _core(structs.get("4H", {})),
+        "tf_1D": _core(structs.get("1D", {})),
+        "decision": {
+            "side": (decision or {}).get("side"),
+            "entries": (decision or {}).get("entries"),
+            "sl": (decision or {}).get("sl"),
+            "tps": (decision or {}).get("tps"),
+            "rr_min": (decision or {}).get("rr_min"),
+            "rr_max": (decision or {}).get("rr_max"),
+            "eta": (decision or {}).get("eta"),
+        }
     }
-    return out
+
+    system = (
+        "Bạn là trader crypto viết nhận định **thuần Việt** gọn, rõ, có hành động. "
+        "Chỉ tạo văn bản, không markdown nặng, không lẫn tiếng Anh. "
+        "Trọng tâm: (1) xu hướng 1D/4H, (2) SR quan trọng và vùng mỏng, "
+        "(3) động lượng RSI/MA20, (4) có/không breakout-breakdown đã xác nhận, "
+        "(5) kế hoạch hành động: vào/thoát/dời SL, (6) nêu RR & ETA (nếu có). "
+        "Tối đa 8–10 dòng, tránh lặp lại khuôn mẫu."
+    )
+    user = (
+        "Phân tích dữ liệu sau và viết nhận định nội bộ (không gửi Telegram):\n"
+        f"{payload}\n"
+        "Yêu cầu thêm: tránh giáo điều, tập trung điều kiện kích hoạt/huỷ kèo, "
+        "nêu rõ mốc giá theo dữ liệu, không liệt kê chỉ báo thừa."
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=mdl,
+            temperature=temp,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            return "[gpt-error] Empty content"
+        return content
+    except Exception as e:
+        return f"[gpt-error] {e}"
