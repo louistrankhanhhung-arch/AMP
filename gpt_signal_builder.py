@@ -181,7 +181,7 @@ def make_comment(symbol: str, side: str, decision: Dict[str,Any]) -> str:
     }
     reasons = [r for r in (decision.get("reasons") or []) if isinstance(r,str)]
     brief = "; ".join(reasons[:2]) if reasons else "Xu hướng đồng pha và có tín hiệu xác nhận."
-    note_sl = " SL bảo thủ (xét theo đóng nến 4H) để hạn chế wick."
+    note_sl = " SL an toàn (xét theo đóng nến 4H) để hạn chế rũ."
     return (brief + "." + note_sl + " " + tips.get(side,"")).strip()
 
 # ---------- rounding theo sàn (tùy chọn) ----------
