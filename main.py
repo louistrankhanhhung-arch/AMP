@@ -186,5 +186,126 @@ def gpt_signal(symbol: str, tfs: str = "4H,1D", limit: int = 300, with_futures: 
     out = make_telegram_signal(s4, s1, trigger_1h=None)  # nếu có trigger_1H JSON, truyền vào đây
     return out
 
+# ====== Background scanner writing signals to logs ======
+import os, time, threading, traceback
+from universe import resolve_symbols
+from gpt_signal_builder import make_telegram_signal
+
+SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "60"))
+SCAN_TFS          = os.getenv("SCAN_TFS", "4H,1D")
+SCAN_LIMIT        = int(os.getenv("SCAN_LIMIT", "200"))
+MIN_BUCKET        = os.getenv("MIN_BUCKET", "A")
+MIN_SCORE         = float(os.getenv("MIN_SCORE", "7"))
+MAX_GPT           = int(os.getenv("MAX_GPT", "8"))
+
+def _bucket_ord(b: str) -> int:
+    return {"A":3, "B":2, "C":1}.get((b or "C").upper(), 0)
+
+def scan_once_for_logs():
+    """Quét toàn bộ SYMBOLS → lọc bucket/score → gọi GPT → IN RA LOGS."""
+    start_ts = datetime.utcnow().isoformat() + "Z"
+    syms = resolve_symbols("")  # ENV-first
+    tflist = _tflist(SCAN_TFS)
+
+    print(f"[scan] start ts={start_ts} symbols={len(syms)} tfs={tflist} limit={SCAN_LIMIT} "
+          f"min_bucket={MIN_BUCKET} min_score={MIN_SCORE}")
+
+    # 1) Build structs (4H/1D) cho tất cả
+    all_structs = []
+    for s in syms:
+        try:
+            all_structs.extend(build_structs_for_symbol(
+                s, tflist, limit=SCAN_LIMIT,
+                with_futures=False, with_liquidity=False
+            ))
+        except Exception as e:
+            print(f"[scan] build_structs error symbol={s}: {e}")
+
+    # 2) Rank & lọc theo bucket/score
+    rks = rank_all(all_structs)
+    ok_syms = set()
+    for r in rks:
+        bucket = getattr(r, "bucket_best", None) or getattr(r, "bucket", None)
+        score  = getattr(r, "score_best", None)  or getattr(r, "score", None)
+        if (bucket and _bucket_ord(bucket) >= _bucket_ord(MIN_BUCKET)) or (
+            isinstance(score, (int,float)) and score >= float(MIN_SCORE)
+        ):
+            ok_syms.add(r.symbol)
+
+    if not ok_syms:
+        print("[scan] no candidates passing filters")
+        return {"ok": True, "count": 0}
+
+    # 3) Gọi GPT cho tối đa MAX_GPT mã
+    picked = [s for s in syms if s in ok_syms][:MAX_GPT]
+    print(f"[scan] candidates={list(picked)} (cap {MAX_GPT})")
+
+    sent = 0
+    for sym in picked:
+        try:
+            s4 = next((x for x in all_structs if x.get("symbol")==sym and x.get("timeframe")=="4H"), None)
+            s1 = next((x for x in all_structs if x.get("symbol")==sym and x.get("timeframe")=="1D"), None)
+            if not s4 or not s1:
+                print(f"[scan] missing structs: {sym}")
+                continue
+
+            out = make_telegram_signal(s4, s1, trigger_1h=None)  # nếu sau dùng trigger_1H thì truyền vào đây
+            if not out.get("ok"):
+                print(f"[scan] GPT err {sym}: {out.get('error')}")
+                continue
+
+            tele = out.get("telegram_text")
+            decision = out.get("decision", {})
+            plan = out.get("plan", {})
+
+            if tele:
+                # === KẾT QUẢ GỬI TELEGRAM – IN THẲNG RA LOG ===
+                print("[signal]\n" + tele)
+                sent += 1
+            else:
+                # WAIT/AVOID
+                act = (decision.get("action") or "").upper()
+                side = decision.get("side")
+                conf = decision.get("confidence")
+                print(f"[signal] {sym} | {act} side={side} conf={conf}")
+
+            # === META LOG (R:R, ETA, CONF) ===
+            meta = out.get("meta", {})
+            rr = meta.get("rr", {})
+            print(f"[meta] {sym} conf={meta.get('confidence')} rr_min={rr.get('rr_min')} rr_max={rr.get('rr_max')} eta={meta.get('eta')}")
+        except Exception:
+            print(f"[scan] exception for {sym}:\n{traceback.format_exc()}")
+
+    print(f"[scan] done ts={datetime.utcnow().isoformat()+'Z'} sent={sent}")
+    return {"ok": True, "count": sent}
+
+def _scan_loop():
+    # vòng lặp nền – chỉ chạy 1 worker
+    while True:
+        try:
+            scan_once_for_logs()
+        except Exception:
+            print("[scan] loop error:\n" + traceback.format_exc())
+        # ngủ theo phút
+        time.sleep(max(1, SCAN_INTERVAL_MIN) * 60)
+
+# Khởi động lịch khi app lên
+@app.on_event("startup")
+def _start_scheduler():
+    print(f"[scheduler] start: interval={SCAN_INTERVAL_MIN}min; MAX_GPT={MAX_GPT}")
+    t = threading.Thread(target=_scan_loop, daemon=True)
+    t.start()
+
+# Endpoint để bấm chạy tay 1 lần (trả JSON)
+@app.post("/scan_once")
+def scan_once_endpoint():
+    try:
+        res = scan_once_for_logs()
+        return {"ok": True, "result": res}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+python -m uvicorn main:app --host :: --port $PORT --workers 1
+
 if __name__ == '__main__':
     main()
