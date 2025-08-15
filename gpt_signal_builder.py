@@ -98,7 +98,7 @@ def build_messages_classify(
     system = {
         "role": "system",
         "content": (
-            "Bạn là trader kỹ thuật. Nhiệm vụ: PHÂN LOẠI nhanh side và hành động dựa trên JSON context (4H/1D + trigger_1h). "
+            "Bạn là trader kỹ thuật. Nhiệm vụ: PHÂN LOẠI nhanh side và hành động dựa trên JSON context (4H/1D + trigger_1h)."
             "Chỉ trả về JSON **tiếng Việt** theo schema: "
             + json.dumps(CLASSIFY_SCHEMA, ensure_ascii=False)
             + "\nQuy tắc: 1D/4H đồng pha + 1H xác nhận → ENTER; mâu thuẫn/chưa rõ → WAIT; ngược mạnh → AVOID. "
