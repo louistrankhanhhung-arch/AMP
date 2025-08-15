@@ -191,12 +191,20 @@ def candle_flags(df: pd.DataFrame) -> Dict[str, bool]:
         "inside_bar": bool(inside),
     }
 
+
 # =====================================================
-# 4) Breakout helpers
+# 4) Breakout / Breakdown helpers
 # =====================================================
 def recent_swing_high(swings: List[Dict[str, Any]]) -> Optional[float]:
     for s in reversed(swings):
         if s.get("type") == "HH":
+            return float(s["price"])
+    return None
+
+
+def recent_swing_low(swings: List[Dict[str, Any]]) -> Optional[float]:
+    for s in reversed(swings):
+        if s.get("type") == "LL":
             return float(s["price"])
     return None
 
@@ -221,6 +229,29 @@ def detect_breakout(
     return {
         "breakout_levels": levels,
         "last_breakout_confirmed": confirmed
+    }
+
+
+def detect_breakdown(
+    df: pd.DataFrame,
+    swings: List[Dict[str, Any]],
+    vol_thr: float = 1.5
+) -> dict:
+    levels = []
+    ll = recent_swing_low(swings)
+    confirmed = False
+
+    if ll is not None:
+        levels.append(ll)
+        close = float(df["close"].iloc[-1])
+        vol_ratio = float(df["vol_ratio"].iloc[-1]) if "vol_ratio" in df.columns else 1.0
+        vol_z = float(df.get("vol_z20", pd.Series([0])).iloc[-1]) if "vol_z20" in df.columns else 0.0
+        vol_ok = (vol_ratio >= vol_thr) or (vol_z >= 1.0)
+        confirmed = (close < ll) and vol_ok
+
+    return {
+        "breakdown_levels": levels,
+        "last_breakdown_confirmed": confirmed
     }
 
 
@@ -305,6 +336,7 @@ def build_struct_json(
     pullback = detect_retest(df)
     div = detect_divergence(df)
     bo = detect_breakout(df, swings, vol_thr=1.5)
+    bd = detect_breakdown(df, swings, vol_thr=1.5)
 
     # Flags BB
     flags = {
@@ -368,12 +400,19 @@ def build_struct_json(
             },
             "market_structure": ms_tags,
         },
-        "events": {**bo, "breakout_vol_ok": volc["breakout_vol_ok"]},
-        "divergence": div,
-        "levels": {**sr, "soft_sr": soft},  # SR cứng + SR mềm
+        # SR cứng + SR mềm
+        "levels": {**sr, "soft_sr": soft},
         "targets": {"up_bands": bands},
         "eta_hint": {"method": "ATR", "per": "bar", "up_bands": eta_bands},
         "confirmations": {"volume": volc, "candles": cndl},
+        # Sự kiện: breakout + breakdown + cờ volume cho cả hai chiều
+        "events": {
+            **bo,
+            **bd,
+            "breakout_vol_ok": volc["breakout_vol_ok"],
+            "breakdown_vol_ok": volc["breakdown_vol_ok"],
+        },
+        "divergence": div,
     }
 
     # Optional: multi-timeframe context
@@ -410,11 +449,11 @@ def build_struct_json(
             "soft_nearest_support": (ctx_soft_dn[0] if ctx_soft_dn else None),
         }
 
-    # Optional: liquidity zones
+    # Optional: liquidity zones (truyền từ ngoài để tái sử dụng/tùy biến tham số)
     if liquidity_zones is not None:
         struct["liquidity_zones"] = liquidity_zones
 
-    # Futures sentiment
+    # Futures sentiment: nếu caller không truyền, cố gắng tự fetch
     if futures_sentiment is not None:
         struct["futures_sentiment"] = futures_sentiment
     else:
@@ -425,5 +464,3 @@ def build_struct_json(
             struct["futures_sentiment"] = {"error": str(e)}
 
     return struct
-
-
