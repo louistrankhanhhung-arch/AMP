@@ -325,15 +325,17 @@ def scan_once_for_logs():
             # plan = out.get("plan", {})
 
             if tele:
-                # === KẾT QUẢ GỬI TELEGRAM – IN THẲNG RA LOG ===
                 print("[signal]\n" + tele)
+                # thêm dòng dưới để log phân tích chi tiết
+                if out.get("analysis_text"):
+                    print("[analysis]\n" + out["analysis_text"])
                 sent += 1
             else:
-                # WAIT/AVOID
-                act = (decision.get("action") or "").upper()
-                side = decision.get("side")
-                conf = decision.get("confidence")
+                act = ...
                 print(f"[signal] {sym} | {act} side={side} conf={conf}")
+                # nếu muốn, cũng có thể log analysis ngắn cho WAIT/AVOID:
+                if out.get("analysis_text"):
+                    print("[analysis]\n" + out["analysis_text"])
 
             # === META LOG (R:R, ETA, CONF) ===
             meta = out.get("meta", {})
