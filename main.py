@@ -1,14 +1,18 @@
 import argparse
 import json
+import os
+import time
+import threading
+import traceback
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 # --- your modules ---
 from kucoin_api import fetch_batch
 from indicators import enrich_indicators, enrich_more, calc_vp, fetch_funding_oi
 from structure_engine import build_struct_json
 from filter import rank_all
-from universe import resolve_symbols  # <= dùng hàm chuẩn hoá danh mục mã
+from universe import resolve_symbols  # dùng hàm chuẩn hoá danh mục mã
 from gpt_signal_builder import make_telegram_signal
 
 # ---------------------------
@@ -84,7 +88,7 @@ def main():
 # ---------------------------
 # FastAPI app (cho Railway)
 # ---------------------------
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 app = FastAPI()
 
@@ -177,20 +181,26 @@ def bucketA_structs(
 @app.get("/gpt_signal.json")
 def gpt_signal(symbol: str, tfs: str = "4H,1D", limit: int = 300, with_futures: int = 0, with_liquidity: int = 0):
     tflist = [x.strip().upper() for x in tfs.split(",") if x.strip()]
+    if "4H" not in tflist or "1D" not in tflist:
+        raise HTTPException(status_code=400, detail="tfs phải gồm 4H và 1D")
     structs = build_structs_for_symbol(symbol, tflist, limit=limit, with_futures=bool(with_futures), with_liquidity=bool(with_liquidity))
     s4 = next((s for s in structs if s.get("timeframe")=="4H"), None)
     s1 = next((s for s in structs if s.get("timeframe")=="1D"), None)
     if not s4 or not s1:
         return {"ok": False, "error": "missing 4H or 1D struct"}
 
-    out = make_telegram_signal(s4, s1, trigger_1h=None)  # nếu có trigger_1H JSON, truyền vào đây
+    # trigger 1H (nếu cần)
+    trigger_1h = None
+    if USE_1H_TRIGGER:
+        trigger_1h = _build_trigger_1h(symbol)
+
+    out = make_telegram_signal(s4, s1, trigger_1h=trigger_1h)
     return out
 
-# ====== Background scanner writing signals to logs ======
-import os, time, threading, traceback
-from universe import resolve_symbols
-from gpt_signal_builder import make_telegram_signal
 
+# ====== Background scanner writing signals to logs ======
+
+# Cấu hình lịch
 SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "60"))
 SCAN_TFS          = os.getenv("SCAN_TFS", "4H,1D")
 SCAN_LIMIT        = int(os.getenv("SCAN_LIMIT", "200"))
@@ -198,8 +208,61 @@ MIN_BUCKET        = os.getenv("MIN_BUCKET", "A")
 MIN_SCORE         = float(os.getenv("MIN_SCORE", "7"))
 MAX_GPT           = int(os.getenv("MAX_GPT", "8"))
 
+# 1H trigger config
+USE_1H_TRIGGER    = int(os.getenv("USE_1H_TRIGGER", "1"))     # 1 = bật 1H cho các mã đậu filter
+TRIGGER_1H_LIMIT  = int(os.getenv("TRIGGER_1H_LIMIT", "180"))
+
 def _bucket_ord(b: str) -> int:
     return {"A":3, "B":2, "C":1}.get((b or "C").upper(), 0)
+
+# ---- round-robin helper ----
+ROUND_ROBIN = {"i": 0}
+def _pick_round_robin(cands: List[str], cap: int) -> List[str]:
+    n = len(cands)
+    if n == 0 or cap <= 0:
+        return []
+    i = ROUND_ROBIN["i"] % n
+    if cap >= n:
+        ROUND_ROBIN["i"] = 0
+        return cands[:]
+    if i + cap <= n:
+        out = cands[i:i+cap]
+    else:
+        out = cands[i:] + cands[:(i+cap) % n]
+    ROUND_ROBIN["i"] = (i + cap) % n
+    return out
+
+# ---- trigger 1H helper ----
+def _build_trigger_1h(symbol: str) -> Dict | None:
+    """
+    Ưu tiên dùng trigger_1H.py nếu bạn đã có.
+    Nếu không, fallback: fetch 1H, enrich, tạo vài flag đơn giản cho GPT.
+    """
+    try:
+        from trigger_1H import build_trigger_for_symbol  # optional
+        return build_trigger_for_symbol(symbol, limit=TRIGGER_1H_LIMIT)
+    except Exception:
+        pass
+    # fallback
+    try:
+        batch = fetch_batch(symbol, timeframes=["1H"], limit=TRIGGER_1H_LIMIT)
+        df = batch.get("1H")
+        if df is None or len(df) == 0:
+            return None
+        df = enrich_more(enrich_indicators(df))
+        last = df.iloc[-1]
+        trig = {
+            "symbol": symbol,
+            "timeframe": "1H",
+            "reclaim_ma20": bool(last["close"] > last["ema20"]),
+            "rsi_gt_50": bool((last.get("rsi", 0) or 0) > 50),
+            "note": "fallback-1H",
+        }
+        return trig
+    except Exception as e:
+        print(f"[scan] trigger_1h fallback error {symbol}: {e}")
+        return None
+
 
 def scan_once_for_logs():
     """Quét toàn bộ SYMBOLS → lọc bucket/score → gọi GPT → IN RA LOGS."""
@@ -236,8 +299,9 @@ def scan_once_for_logs():
         print("[scan] no candidates passing filters")
         return {"ok": True, "count": 0}
 
-    # 3) Gọi GPT cho tối đa MAX_GPT mã
-    picked = [s for s in syms if s in ok_syms][:MAX_GPT]
+    # 3) Chọn MAX_GPT theo round-robin
+    cands = [s for s in syms if s in ok_syms]
+    picked = _pick_round_robin(cands, MAX_GPT)
     print(f"[scan] candidates={list(picked)} (cap {MAX_GPT})")
 
     sent = 0
@@ -249,14 +313,16 @@ def scan_once_for_logs():
                 print(f"[scan] missing structs: {sym}")
                 continue
 
-            out = make_telegram_signal(s4, s1, trigger_1h=None)  # nếu sau dùng trigger_1H thì truyền vào đây
+            trigger_1h = _build_trigger_1h(sym) if USE_1H_TRIGGER else None
+
+            out = make_telegram_signal(s4, s1, trigger_1h=trigger_1h)
             if not out.get("ok"):
                 print(f"[scan] GPT err {sym}: {out.get('error')}")
                 continue
 
             tele = out.get("telegram_text")
             decision = out.get("decision", {})
-            plan = out.get("plan", {})
+            # plan = out.get("plan", {})
 
             if tele:
                 # === KẾT QUẢ GỬI TELEGRAM – IN THẲNG RA LOG ===
@@ -292,7 +358,7 @@ def _scan_loop():
 # Khởi động lịch khi app lên
 @app.on_event("startup")
 def _start_scheduler():
-    print(f"[scheduler] start: interval={SCAN_INTERVAL_MIN}min; MAX_GPT={MAX_GPT}")
+    print(f"[scheduler] start: interval={SCAN_INTERVAL_MIN}min; MAX_GPT={MAX_GPT} USE_1H_TRIGGER={USE_1H_TRIGGER}")
     t = threading.Thread(target=_scan_loop, daemon=True)
     t.start()
 
@@ -305,7 +371,6 @@ def scan_once_endpoint():
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-python -m uvicorn main:app --host :: --port $PORT --workers 1
 
 if __name__ == '__main__':
     main()
