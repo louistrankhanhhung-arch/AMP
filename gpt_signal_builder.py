@@ -102,6 +102,7 @@ def build_messages_classify(
             "Chỉ trả về JSON **tiếng Việt** theo schema: "
             + json.dumps(CLASSIFY_SCHEMA, ensure_ascii=False)
             + "\nQuy tắc: 1D/4H đồng pha + 1H xác nhận → ENTER; mâu thuẫn/chưa rõ → WAIT; ngược mạnh → AVOID. "
+            + "Nếu 4H/1D cùng giảm (hoặc cùng tăng) nhưng 1H chưa xác nhận, đặt action="WAIT" (không dùng AVOID). AVOID chỉ khi định đi ngược xu hướng chính hoặc R:R xấu/levels tắc."
             "Trường 'reasons' là mảng 3–6 câu **tiếng Việt**, ngắn gọn, liên hệ trực tiếp các số liệu (RSI, EMA20/50, BB, swing...)."
         ),
     }
