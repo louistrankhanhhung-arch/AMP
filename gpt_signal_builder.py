@@ -51,7 +51,7 @@ PLAN_SCHEMA = {
     }
 }
 
-# ---------- prompts ----------
+# ---------- prompts (classify/plan) ----------
 def build_messages_classify(struct_4h: Dict[str,Any], struct_1d: Dict[str,Any], trigger_1h: Optional[Dict[str,Any]]=None):
     ctx = {"struct_4h":struct_4h,"struct_1d":struct_1d,"trigger_1h":trigger_1h or {}}
     system = {
@@ -60,7 +60,7 @@ def build_messages_classify(struct_4h: Dict[str,Any], struct_1d: Dict[str,Any], 
             "Bạn là trader kỹ thuật. Nhiệm vụ: PHÂN LOẠI nhanh side và hành động dựa trên JSON context (4H/1D + trigger_1h). "
             "Chỉ trả về JSON **tiếng Việt** theo schema: " + json.dumps(CLASSIFY_SCHEMA, ensure_ascii=False) +
             "\nQuy tắc: 1D/4H đồng pha + 1H xác nhận → ENTER; mâu thuẫn/chưa rõ → WAIT; ngược mạnh → AVOID. "
-            "Trường 'reasons' là mảng 3–6 câu **tiếng Việt**, ngắn gọn, tránh liệt kê rườm rà."
+            "Trường 'reasons' là mảng 3–6 câu **tiếng Việt**, ngắn gọn, liên hệ trực tiếp các số liệu (RSI, EMA20/50, BB, swing...)."
         )
     }
     user = {"role":"user","content":[
@@ -71,14 +71,13 @@ def build_messages_classify(struct_4h: Dict[str,Any], struct_1d: Dict[str,Any], 
 
 def _sl_policy_block(risk_mode: str) -> str:
     rm = (risk_mode or DEFAULT_RISK_MODE).lower()
-    # ép giải thích tiếng Việt và 1 giá trị stop duy nhất theo policy
     return f"""
 Chính sách SL = {rm}.
 - Nếu conservative:
   • LONG: đặt SL **bảo thủ** để tránh wick: SL = min(đáy swing gần (4H, 5–7 nến), EMA50_4H) − 0.2×ATR14_4H (nếu có).
   • SHORT: SL = max(đỉnh swing gần (4H, 5–7 nến), EMA50_4H) + 0.2×ATR14_4H.
   • Thiếu dữ liệu → ưu tiên EMA50_4H và swing gần nhất; KHÔNG dùng EMA20 làm SL.
-  • Ghi chú trong 'Nhận định' rằng SL là conservative và xét theo **đóng nến 4H** để tránh wick.
+  • SL xét theo **đóng nến 4H** để hạn chế wick.
 - Nếu neutral: dùng swing gần nhất ± 0.1×ATR14_4H.
 - Nếu aggressive: tham chiếu EMA20_4H ± 0.1×ATR14_4H.
 BẮT BUỘC tuân thủ chính sách SL ở trên; chỉ xuất **1 giá trị** 'stop' trong JSON.
@@ -173,17 +172,6 @@ def compute_rr(side: str, entries: List[float], stop: float, tps: List[float]) -
         "rr_max": max([x for x in rr_list if x is not None], default=None),
     }
 
-# ---------- comment (tiếng Việt tuyệt đối) ----------
-def make_comment(symbol: str, side: str, decision: Dict[str,Any]) -> str:
-    tips = {
-        "long": "Ưu tiên vào theo xu hướng, chia 1–2 lệnh; đạt TP1 thì dời SL về hòa vốn, chốt dần tại TP2–TP3.",
-        "short": "Ưu tiên bán theo xu hướng, vào từng phần; đạt TP1 dời SL về hòa vốn, chốt dần tại TP2–TP3."
-    }
-    reasons = [r for r in (decision.get("reasons") or []) if isinstance(r,str)]
-    brief = "; ".join(reasons[:2]) if reasons else "Xu hướng đồng pha và có tín hiệu xác nhận."
-    note_sl = " SL an toàn (xét theo đóng nến 4H) để hạn chế rũ."
-    return (brief + "." + note_sl + " " + tips.get(side,"")).strip()
-
 # ---------- rounding theo sàn (tùy chọn) ----------
 def round_by_exchange(plan: Dict[str,Any]) -> Dict[str,Any]:
     try:
@@ -194,12 +182,57 @@ def round_by_exchange(plan: Dict[str,Any]) -> Dict[str,Any]:
     except Exception:
         return plan
 
+# ---------- Analysis prompt (tiếng Việt, chi tiết để in Logs) ----------
+def build_messages_analysis(struct_4h: Dict[str,Any], struct_1d: Dict[str,Any], trigger_1h: Optional[Dict[str,Any]], decision: Dict[str,Any], plan: Optional[Dict[str,Any]], rr_meta: Dict[str,Any]) -> List[Dict[str,Any]]:
+    """
+    Yêu cầu GPT viết phân tích chi tiết (tiếng Việt), dùng SỐ LIỆU trong JSON:
+    - Xu hướng 1D/4H (trạng thái so với EMA20/EMA50, độ dốc BB)
+    - RSI (1D/4H, nếu có)
+    - Volume vs SMA20 (nếu có)
+    - SR chính (Daily) và SR nội ngày (4H) từ context_levels.* nếu có
+    - Những vùng mỏng/thanh khoản yếu (nếu có trường liquidity)
+    - Trigger 1H: reclaim/pullback (nếu có)
+    - Kế hoạch hành động ngắn gọn (enter, quản trị sau TP1, điều kiện thoát sớm)
+    - R:R (rr_min/rr_max) & ETA (tóm tắt)
+    """
+    sys = {
+        "role":"system",
+        "content":(
+            "Bạn là trợ lý giao dịch. Hãy viết phân tích **TIẾNG VIỆT**, súc tích, dựa 100% vào số liệu trong JSON. "
+            "Không nói chung chung. Nếu thiếu dữ liệu, bỏ qua mục đó."
+        )
+    }
+    payload = {
+        "struct_4h": struct_4h, "struct_1d": struct_1d,
+        "trigger_1h": trigger_1h or {},
+        "decision": decision or {},
+        "plan": plan or {},
+        "rr": rr_meta or {}
+    }
+    usr = {
+        "role":"user",
+        "content":(
+            "Viết phần **PHÂN TÍCH CHI TIẾT** để in Logs (không gửi Telegram). Dàn ý:\n"
+            "• Xu hướng: 1D/4H đang ở đâu so với EMA20/EMA50, BB dốc thế nào.\n"
+            "• RSI: giá trị hiện tại 1D/4H (nếu có), còn dư địa hay quá mua.\n"
+            "• Volume: so với SMA20 (nếu có) – tăng/giảm.\n"
+            "• Hỗ trợ/kháng cự: liệt kê 2–4 mức gần nhất từ context_levels (Daily & 4H) nếu có.\n"
+            "• Vùng mỏng/thanh khoản: nếu có liquidity_zones.\n"
+            "• Trigger 1H (nếu có): reclaim MA20/pullback…\n"
+            "• Kế hoạch: tóm tắt cách vào/thoát, điều kiện dời SL/thoát sớm.\n"
+            "• R:R & ETA: tóm tắt rr_min/rr_max và ETA ngắn gọn.\n"
+            "YÊU CẦU: Nêu số liệu cụ thể (ví dụ: RSI=56, Close>EMA20≈24.5). Không thêm emoji, không nhắc chuyện gửi Telegram."
+            f"\nJSON:\n{json.dumps(payload, ensure_ascii=False)}"
+        )
+    }
+    return [sys, usr]
+
 # ---------- OpenAI orchestration ----------
 def classify_and_plan(struct_4h: dict, struct_1d: dict, trigger_1h: dict|None=None, model: str|None=None, risk_mode: str|None=None) -> dict:
     mdl = model or DEFAULT_MODEL
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    # Phase 1: classify (tiếng Việt)
+    # Phase 1: classify (VN)
     resp1 = client.chat.completions.create(model=mdl, messages=build_messages_classify(struct_4h, struct_1d, trigger_1h), temperature=0)
     text1 = resp1.choices[0].message.content or ""
     ok1, cls, err1 = parse_json_block(text1)
@@ -211,7 +244,7 @@ def classify_and_plan(struct_4h: dict, struct_1d: dict, trigger_1h: dict|None=No
     if action != "ENTER" or side not in ("long","short"):
         return {"ok":True, "decision":cls}
 
-    # Phase 2: plan (SL theo policy + tiếng Việt)
+    # Phase 2: plan (VN, SL policy)
     resp2 = client.chat.completions.create(
         model=mdl,
         messages=build_messages_plan(struct_4h, struct_1d, side=side, classify_reasoning=cls, risk_mode=risk_mode or DEFAULT_RISK_MODE),
@@ -228,9 +261,10 @@ def classify_and_plan(struct_4h: dict, struct_1d: dict, trigger_1h: dict|None=No
 # ---------- Public API ----------
 def make_telegram_signal(struct_4h: dict, struct_1d: dict, trigger_1h: dict|None=None, model: str|None=None) -> dict:
     """
-    Kết quả:
+    Trả:
       ok: bool
-      telegram_text: str  (text gửi Telegram)
+      telegram_text: str  (text gửi Telegram, KHÔNG có 'Nhận định')
+      analysis_text: str  (chỉ để in Logs, tiếng Việt, chi tiết)
       meta: { rr, eta, confidence, ... }
       decision: {...}, plan: {...}
     """
@@ -240,8 +274,11 @@ def make_telegram_signal(struct_4h: dict, struct_1d: dict, trigger_1h: dict|None
 
     decision = out.get("decision")
     plan     = out.get("plan")
+
+    # Nếu không vào lệnh → không tạo telegram_text, nhưng vẫn có thể tạo analysis ngắn
     if not plan:
-        return {"ok":True, "decision":decision, "telegram_text":None, "meta":{"note":"NO-ENTER"}}
+        analysis_text = f"[ĐÁNH GIÁ] {decision.get('symbol','?')} | {decision.get('action')} | side={decision.get('side')} | conf={decision.get('confidence')}\n- " + "; ".join((decision.get("reasons") or [])[:4])
+        return {"ok":True, "decision":decision, "telegram_text":None, "analysis_text":analysis_text, "meta":{"note":"NO-ENTER"}}
 
     symbol = plan["symbol"]
     side   = plan["side"]
@@ -250,14 +287,17 @@ def make_telegram_signal(struct_4h: dict, struct_1d: dict, trigger_1h: dict|None
     tps     = plan["tps"]
     eta     = plan.get("eta", {})
 
+    # leverage theo confidence
     conf = float(decision.get("confidence", 0.6) or 0.6)
     lev  = pick_leverage(conf)
-    rr   = compute_rr(side, entries, stop, tps)
 
+    # R:R
+    rr = compute_rr(side, entries, stop, tps)
+
+    # telegram_text (KHÔNG có 'Nhận định')
     def fmt(x):
         try: return f"{float(x):.6f}".rstrip('0').rstrip('.')
         except: return str(x)
-
     direction = "LONG" if side=="long" else "SHORT"
     lines = [f"{symbol} | {direction}"]
     lines.append(f"Entry 1: {fmt(entries[0])}")
@@ -267,11 +307,20 @@ def make_telegram_signal(struct_4h: dict, struct_1d: dict, trigger_1h: dict|None
     for i in range(min(3, len(tps))):
         lines.append(f"TP{i+1}: {fmt(tps[i])}")
     lines.append(f"Đòn bẩy: {lev}")
-
-    comment = make_comment(symbol, side, decision)
-    if comment:
-        lines.append(f"Nhận định: {comment}")
-
     telegram_text = "\n".join(lines)
+
+    # analysis_text (tiếng Việt, đặc thù theo JSON)
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        msgs = build_messages_analysis(struct_4h, struct_1d, trigger_1h, decision, plan, rr_meta={"rr_min": rr["rr_min"], "rr_max": rr["rr_max"], "eta": eta})
+        respA = client.chat.completions.create(model=DEFAULT_MODEL, messages=msgs, temperature=0.1)
+        analysis_text = (respA.choices[0].message.content or "").strip()
+    except Exception as e:
+        # fallback ngắn gọn nếu GPT lỗi
+        brief = "; ".join((decision.get("reasons") or [])[:3]) or "Xu hướng cùng pha; theo dõi phản ứng tại SR gần."
+        analysis_text = (f"{symbol} | {direction}\n"
+                         f"- Lý do: {brief}\n"
+                         f"- R:R ~ {rr.get('rr_min')}→{rr.get('rr_max')} ; ETA: {eta if eta else '—'}")
+
     meta = {"confidence": conf, "eta": eta, "rr": rr, "decision": decision, "plan": plan}
-    return {"ok":True, "telegram_text": telegram_text, "meta": meta, "decision": decision, "plan": plan}
+    return {"ok":True, "telegram_text": telegram_text, "analysis_text": analysis_text, "meta": meta, "decision": decision, "plan": plan}
