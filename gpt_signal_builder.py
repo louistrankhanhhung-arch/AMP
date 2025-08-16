@@ -17,7 +17,7 @@ from openai import OpenAI
 # ---------------------------------------------------------------------------
 # Defaults & constants
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DEFAULT_RISK_MODE = os.getenv("RISK_MODE", "conservative").lower()
 
 
