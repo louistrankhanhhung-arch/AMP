@@ -43,6 +43,33 @@ def parse_json_block(text: str) -> Tuple[bool, Any, str]:
     except Exception as e:  # noqa: BLE001 - keep broad to surface any JSON issue
         return False, None, f"JSON parse error: {e}"
 
+def _snap_facts(struct: Dict[str, Any]) -> Dict[str, Any]:
+    """Rút gọn số liệu cứng cho một timeframe để tránh đảo khung khi mô tả."""
+    snap = struct.get("snapshot", {}) or {}
+    price = snap.get("price", {}) or {}
+    ma = snap.get("ma", {}) or {}
+    try:
+        close = float(price.get("close", 0.0) or 0.0)
+        ema20 = float(ma.get("ema20", 0.0) or 0.0)
+        ema50 = float(ma.get("ema50", 0.0) or 0.0)
+        rsi14 = float(snap.get("rsi14", 50.0) or 50.0)
+    except Exception:
+        close = ema20 = ema50 = rsi14 = 0.0
+    return {
+        "close": close,
+        "ema20": ema20,
+        "ema50": ema50,
+        "rsi14": rsi14,
+        "above_ema20": bool(close >= ema20),
+        "above_ema50": bool(close >= ema50),
+        "ema20_ge_ema50": bool(ema20 >= ema50),
+        "ema20_lt_ema50": bool(ema20 < ema50),
+    }
+
+def _pair_facts(struct_4h: Dict[str, Any], struct_1d: Dict[str, Any]) -> Dict[str, Any]:
+    """Gộp facts của 4H (h4) và 1D (d1) để đưa vào prompt."""
+    return {"h4": _snap_facts(struct_4h), "d1": _snap_facts(struct_1d)}
+
 
 def _trim_float(x: Optional[float], ndigits: int = 6) -> Optional[float]:
     if x is None:
@@ -94,7 +121,12 @@ def build_messages_classify(
     struct_1d: Dict[str, Any],
     trigger_1h: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    ctx = {"struct_4h": struct_4h, "struct_1d": struct_1d, "trigger_1h": trigger_1h or {}}
+    ctx = {
+        "struct_4h": struct_4h,
+        "struct_1d": struct_1d,
+        "trigger_1h": trigger_1h or {},
+        "facts": _pair_facts(struct_4h, struct_1d),
+    }
     system = {
         "role": "system",
         "content": (
@@ -104,7 +136,8 @@ def build_messages_classify(
             + "\nQuy tắc: 1D/4H đồng pha + 1H xác nhận → ENTER; mâu thuẫn/chưa rõ → WAIT; ngược mạnh → AVOID. "
             + "Nếu 4H/1D cùng giảm (hoặc cùng tăng) nhưng 1H chưa xác nhận, đặt action='WAIT' (không dùng AVOID). "
               "AVOID chỉ khi định đi ngược xu hướng chính hoặc R:R xấu/levels tắc. "
-            "Trường 'reasons' là mảng 3–6 câu **tiếng Việt**, ngắn gọn, liên hệ trực tiếp các số liệu (RSI, EMA20/50, BB, swing...)."
+            "KHI NÓI 'trên/dưới EMA20/EMA50' HOẶC 'EMA20 so với EMA50', BẮT BUỘC dùng các boolean trong ctx.facts (không tự suy diễn). "
+            "Trường 'reasons' là mảng 3–6 câu **tiếng Việt**, ngắn gọn, bám số liệu (RSI, EMA20/50, BB, swing...)."
         ),
     }
     user = {
@@ -115,6 +148,7 @@ def build_messages_classify(
         ],
     }
     return [system, user]
+
 
 
 def _sl_policy_block(risk_mode: str) -> str:
@@ -285,22 +319,16 @@ def build_messages_analysis(
     rr_meta: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     """
-    Yêu cầu GPT viết phân tích chi tiết (tiếng Việt), dùng SỐ LIỆU trong JSON:
-    - Xu hướng 1D/4H (trạng thái so với EMA20/EMA50, độ dốc BB)
-    - RSI (1D/4H, nếu có)
-    - Volume vs SMA20 (nếu có)
-    - SR chính (Daily) và SR nội ngày (4H) từ context_levels.* nếu có
-    - Những vùng mỏng/thanh khoản yếu (nếu có trường liquidity)
-    - Trigger 1H: reclaim/pullback (nếu có)
-    - Kế hoạch hành động ngắn gọn (enter, quản trị sau TP1, điều kiện thoát sớm)
-    - R:R (rr_min/rr_max) & ETA (tóm tắt)
+    Viết phân tích chi tiết (tiếng Việt), NHẤT QUÁN SỐ LIỆU theo JSON:
+    - Xu hướng 1D/4H (trạng thái so với EMA20/EMA50, BB)
+    - RSI, Volume, SR chính/ nội ngày, Trigger 1H, Kế hoạch, R:R & ETA
     """
 
     sys = {
         "role": "system",
         "content": (
             "Bạn là trợ lý giao dịch. Hãy viết phân tích **TIẾNG VIỆT**, súc tích, dựa 100% vào số liệu trong JSON. "
-            "Không nói chung chung. Nếu thiếu dữ liệu, bỏ qua mục đó."
+            "Khi so sánh 4H và 1D (EMA20/EMA50, giá trên/dưới), BẮT BUỘC dùng ctx.facts.h4 và ctx.facts.d1."
         ),
     }
 
@@ -308,6 +336,7 @@ def build_messages_analysis(
         "struct_4h": struct_4h,
         "struct_1d": struct_1d,
         "trigger_1h": trigger_1h or {},
+        "facts": _pair_facts(struct_4h, struct_1d),
         "decision": decision or {},
         "plan": plan or {},
         "rr": rr_meta or {},
@@ -317,19 +346,18 @@ def build_messages_analysis(
         "role": "user",
         "content": (
             "Viết phần **PHÂN TÍCH CHI TIẾT** để in Logs (không gửi Telegram). Dàn ý:\n"
-            "• Xu hướng: 1D/4H đang ở đâu so với EMA20/EMA50, BB dốc thế nào.\n"
-            "• RSI: giá trị hiện tại 1D/4H (nếu có), còn dư địa hay quá mua.\n"
-            "• Volume: so với SMA20 (nếu có) – tăng/giảm.\n"
-            "• Hỗ trợ/kháng cự: liệt kê 2–4 mức gần nhất từ context_levels (Daily & 4H) nếu có.\n"
-            "• Vùng mỏng/thanh khoản: nếu có liquidity_zones.\n"
-            "• Trigger 1H (nếu có): reclaim MA20/pullback…\n"
-            "• Kế hoạch: tóm tắt cách vào/thoát, điều kiện dời SL/thoát sớm.\n"
-            "• R:R & ETA: tóm tắt rr_min/rr_max và ETA ngắn gọn.\n"
-            "YÊU CẦU: Nêu số liệu cụ thể (ví dụ: RSI=56, Close>EMA20≈24.5). Không thêm emoji, không nhắc chuyện gửi Telegram."
+            "• Xu hướng: 1D/4H đang ở đâu so với EMA20/EMA50 (dùng ctx.facts), BB dốc thế nào.\n"
+            "• RSI 1D/4H; Volume vs SMA20.\n"
+            "• SR Daily & 4H (2–4 mức gần nhất từ context_levels nếu có).\n"
+            "• Trigger 1H (nếu có): reclaim/pullback/breakout.\n"
+            "• Kế hoạch: tóm tắt vào/thoát, điều kiện dời SL/thoát sớm.\n"
+            "• R:R & ETA: rr_min/rr_max và ETA ngắn gọn.\n"
+            "Không thêm emoji, không nhắc chuyện gửi Telegram."
             f"\nJSON:\n{json.dumps(payload, ensure_ascii=False)}"
         ),
     }
     return [sys, usr]
+
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +487,7 @@ def make_telegram_signal(
             plan,
             rr_meta={"rr_min": rr["rr_min"], "rr_max": rr["rr_max"], "eta": eta},
         )
-        respA = client.chat.completions.create(model=DEFAULT_MODEL, messages=msgs, temperature=0.2)
+        respA = client.chat.completions.create(model=DEFAULT_MODEL, messages=msgs, temperature=0)
         analysis_text = (respA.choices[0].message.content or "").strip()
     except Exception:
         # Fallback concise analysis if GPT errors
