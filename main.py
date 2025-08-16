@@ -221,18 +221,18 @@ TRIGGER_1H_LIMIT  = int(os.getenv("TRIGGER_1H_LIMIT", "180"))
 def _bucket_ord(b: str) -> int:
     return {"A":3, "B":2, "C":1}.get((b or "C").upper(), 0)
 
-+# ---------- Telegram wiring (khởi tạo 1 lần, dùng cho toàn app) ----------
-+TELEGRAM_BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
-+TELEGRAM_CHANNEL_ID  = int(os.getenv("TELEGRAM_CHANNEL_ID", "0"))
-+JOIN_URL             = os.getenv("JOIN_URL", None)
-+POLICY_DB            = os.getenv("POLICY_DB", "/mnt/data/policy.sqlite3")
-+POLICY_KEY           = os.getenv("POLICY_KEY", "global")
-+
-+_BOT      = TeleBot(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID else None
-+_NOTIFIER = TelegramNotifier() if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID else None
-+_POLICY   = DailyQuotaPolicy(db_path=POLICY_DB, key=POLICY_KEY)
-+_WATCHER  = PriceWatcher()
-+
+# ---------- Telegram wiring (khởi tạo 1 lần, dùng cho toàn app) ----------
+TELEGRAM_BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHANNEL_ID  = int(os.getenv("TELEGRAM_CHANNEL_ID", "0"))
+JOIN_URL             = os.getenv("JOIN_URL", None)
+POLICY_DB            = os.getenv("POLICY_DB", "/mnt/data/policy.sqlite3")
+POLICY_KEY           = os.getenv("POLICY_KEY", "global")
+
+_BOT      = TeleBot(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID else None
+_NOTIFIER = TelegramNotifier() if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID else None
+_POLICY   = DailyQuotaPolicy(db_path=POLICY_DB, key=POLICY_KEY)
+_WATCHER  = PriceWatcher()
+
 
 # ---- round-robin helper ----
 ROUND_ROBIN = {"i": 0}
@@ -343,72 +343,72 @@ def scan_once_for_logs():
             decision = out.get("decision") or {}   # đảm bảo là dict
 
             # --- ĐĂNG TELEGRAM + NỐI DÂY TRACKER ---
-+            if tele and _BOT and _NOTIFIER:
-+                # Ưu tiên dùng plan/signal chi tiết nếu có để post dạng teaser/full qua telegram_poster
-+                plan = out.get("plan") or out.get("signal") or {}
-+                try:
-+                    tg_sig = TgSignal(
-+                        signal_id = plan.get("signal_id") or out.get("signal_id") or f"{sym.replace('/','')}-{int(time.time())}",
-+                        symbol    = sym.replace("/", ""),
-+                        timeframe = plan.get("timeframe") or "1H",
-+                        side      = plan.get("side") or (decision.get("side") or "long"),
-+                        strategy  = plan.get("strategy") or "Auto-plan",
-+                        entries   = plan.get("entries") or [],
-+                        sl        = plan.get("sl") if plan.get("sl") is not None else 0.0,
-+                        tps       = plan.get("tps") or [],
-+                        leverage  = plan.get("leverage"),
-+                        eta       = plan.get("eta"),
-+                    )
-+                    # Đăng bài lên channel để lấy chat_id/message_id
-+                    info = post_signal(
-+                        bot=_BOT,
-+                        channel_id=TELEGRAM_CHANNEL_ID,
-+                        sig=tg_sig,
-+                        policy=_POLICY,
-+                        max_free_per_day=2,
-+                        min_plus_between_free=5,
-+                        force_free=False,
-+                        join_btn_url=JOIN_URL,
-+                    )
-+                    post_ref = PostRef(info["chat_id"], info["message_id"])
-+
-+                    # Mở tracker & nối watcher
-+                    tracker = SignalTracker(_NOTIFIER)
-+                    tracker.open_signal(
-+                        signal_id=tg_sig.signal_id,
-+                        symbol=sym,                         # giữ "SUI/USDT" cho watcher
-+                        side=tg_sig.side,
-+                        entries=tg_sig.entries,
-+                        stop=tg_sig.sl,
-+                        tps=tg_sig.tps,
-+                        post_ref=post_ref,
-+                        sl_mode=plan.get("sl_mode", "hard"),
-+                    )
-+                    wire_symbol(_WATCHER, tracker, sym)
-+                    sent += 1
-+                    # In thêm bản text để dễ debug
-+                    print("[signal]\n" + tele)
-+                    if out.get("analysis_text"):
-+                        print("[analysis]\n" + out["analysis_text"])
-+                except Exception as ee:
-+                    # Nếu thiếu dữ liệu để post theo poster, fallback in log như cũ
-+                    print(f"[signal] post/wire fallback for {sym}: {ee}")
-+                    print("[signal]\n" + tele)
-+                    if out.get("analysis_text"):
-+                        print("[analysis]\n" + out["analysis_text"])
-+            else:
-+                # Không có telegram_text hoặc chưa cấu hình bot/channel → giữ nguyên log cũ
-+                if tele:
-+                    print("[signal]\n" + tele)
-+                    if out.get("analysis_text"):
-+                        print("[analysis]\n" + out["analysis_text"])
-+                else:
-+                    act  = str(decision.get("action") or "N/A").upper()
-+                    side = str(decision.get("side") or "none")
-+                    conf = decision.get("confidence")
-+                    print(f"[signal] {sym} | {act} side={side} conf={conf}")
-+                    if out.get("analysis_text"):
-+                        print("[analysis]\n" + out["analysis_text"])
+            if tele and _BOT and _NOTIFIER:
+                # Ưu tiên dùng plan/signal chi tiết nếu có để post dạng teaser/full qua telegram_poster
+                plan = out.get("plan") or out.get("signal") or {}
+                try:
+                    tg_sig = TgSignal(
+                        signal_id = plan.get("signal_id") or out.get("signal_id") or f"{sym.replace('/','')}-{int(time.time())}",
+                        symbol    = sym.replace("/", ""),
+                        timeframe = plan.get("timeframe") or "1H",
+                        side      = plan.get("side") or (decision.get("side") or "long"),
+                        strategy  = plan.get("strategy") or "Auto-plan",
+                        entries   = plan.get("entries") or [],
+                        sl        = plan.get("sl") if plan.get("sl") is not None else 0.0,
+                        tps       = plan.get("tps") or [],
+                        leverage  = plan.get("leverage"),
+                        eta       = plan.get("eta"),
+                    )
+                    # Đăng bài lên channel để lấy chat_id/message_id
+                    info = post_signal(
+                        bot=_BOT,
+                        channel_id=TELEGRAM_CHANNEL_ID,
+                        sig=tg_sig,
+                        policy=_POLICY,
+                        max_free_per_day=2,
+                        min_plus_between_free=5,
+                        force_free=False,
+                        join_btn_url=JOIN_URL,
+                    )
+                    post_ref = PostRef(info["chat_id"], info["message_id"])
+
+                    # Mở tracker & nối watcher
+                    tracker = SignalTracker(_NOTIFIER)
+                    tracker.open_signal(
+                        signal_id=tg_sig.signal_id,
+                        symbol=sym,                         # giữ "SUI/USDT" cho watcher
+                        side=tg_sig.side,
+                        entries=tg_sig.entries,
+                        stop=tg_sig.sl,
+                        tps=tg_sig.tps,
+                        post_ref=post_ref,
+                        sl_mode=plan.get("sl_mode", "hard"),
+                    )
+                    wire_symbol(_WATCHER, tracker, sym)
+                    sent += 1
+                    # In thêm bản text để dễ debug
+                    print("[signal]\n" + tele)
+                    if out.get("analysis_text"):
+                        print("[analysis]\n" + out["analysis_text"])
+                except Exception as ee:
+                    # Nếu thiếu dữ liệu để post theo poster, fallback in log như cũ
+                    print(f"[signal] post/wire fallback for {sym}: {ee}")
+                    print("[signal]\n" + tele)
+                    if out.get("analysis_text"):
+                        print("[analysis]\n" + out["analysis_text"])
+            else:
+                # Không có telegram_text hoặc chưa cấu hình bot/channel → giữ nguyên log cũ
+                if tele:
+                    print("[signal]\n" + tele)
+                    if out.get("analysis_text"):
+                        print("[analysis]\n" + out["analysis_text"])
+                else:
+                    act  = str(decision.get("action") or "N/A").upper()
+                    side = str(decision.get("side") or "none")
+                    conf = decision.get("confidence")
+                    print(f"[signal] {sym} | {act} side={side} conf={conf}")
+                    if out.get("analysis_text"):
+                        print("[analysis]\n" + out["analysis_text"])
             
 
 
