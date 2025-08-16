@@ -1,10 +1,10 @@
 # glue_tick.py (rút gọn)
 import time
-from notifier import ConsoleNotifier
+from notifier import TelegramNotifier
 from signal_tracker import SignalTracker
 from price_watcher import PriceWatcher, BarCloseCallback
 
-notifier = ConsoleNotifier()
+notifier = TelegramNotifier()
 tracker = SignalTracker(notifier)
 watcher = PriceWatcher()
 
