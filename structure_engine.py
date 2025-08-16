@@ -71,10 +71,51 @@ def detect_trend(df: pd.DataFrame, swings) -> Dict[str, Any]:
 
 
 def find_sr(df: pd.DataFrame, swings) -> Dict[str, list]:
-    closes = df['close'].tail(200)
-    sr_up = sorted({round(x, 2) for x in closes.nlargest(6).tolist()})
-    sr_down = sorted({round(x, 2) for x in closes.nsmallest(6).tolist()})
-    return {"sr_up": sr_up, "sr_down": sr_down}
+    """
+    SR giàu lớp hơn:
+    - local highs/lows theo rolling (đỉnh/đáy cục bộ)
+    - extremes theo close (nhiều hơn bản cũ)
+    - gộp các mức gần nhau theo tolerance dựa trên ATR (0.5 * ATR)
+    """
+    sub = df.tail(300)
+    close = float(sub['close'].iloc[-1])
+    atr = float(sub['atr14'].iloc[-1] or 0.0)
+    tol = max(atr * 0.5, 1e-6)
+
+    # 1) local highs/lows (đỉnh/đáy cục bộ)
+    highs = sub['high']
+    lows  = sub['low']
+    loc_high = highs[(highs.shift(1) < highs) & (highs.shift(-1) < highs)]
+    loc_low  = lows[(lows.shift(1)  > lows)  & (lows.shift(-1)  > lows)]
+
+    # 2) extremes theo close (lấy nhiều hơn để bắt lớp mỏng)
+    closes = sub['close']
+    extreme_up   = closes.nlargest(12).tolist()
+    extreme_down = closes.nsmallest(12).tolist()
+
+    # Gom ứng viên
+    cands = []
+    cands += [float(x) for x in loc_high.dropna().tolist()]
+    cands += [float(x) for x in loc_low.dropna().tolist()]
+    cands += [float(x) for x in extreme_up if np.isfinite(x)]
+    cands += [float(x) for x in extreme_down if np.isfinite(x)]
+
+    # Dedup/cluster 1D theo tolerance
+    cands = sorted(set([round(x, 4) for x in cands]))
+    merged = []
+    for p in cands:
+        if not merged:
+            merged.append(p); continue
+        if abs(p - merged[-1]) <= tol:
+            merged[-1] = (merged[-1] + p) / 2.0
+        else:
+            merged.append(p)
+
+    sr_up   = sorted({round(x, 4) for x in merged if x > close})
+    sr_down = sorted({round(x, 4) for x in merged if x < close})
+
+    # Cắt số lượng để gọn nhưng vẫn dày hơn bản cũ
+    return {"sr_up": sr_up[:20], "sr_down": sr_down[-20:]}
 
 
 def detect_retest(df: pd.DataFrame) -> Dict[str, Any]:
@@ -348,15 +389,22 @@ def build_struct_json(
     atr = float(df['atr14'].iloc[-1] or 0.0)
     tf_hours = _tf_to_hours(tf)
 
-    # Bands + ETA
-    bands = cluster_levels(sr.get('sr_up', [])[:6], atr=atr, k=0.7)
+    # -------- Bands + ETA: đối xứng up/down --------
+    sr_up = sr.get('sr_up', [])[:10]
+    sr_dn = sr.get('sr_down', [])[:10]
+
+    bands_up = cluster_levels(sr_up, atr=atr, k=0.7)
+    bands_dn = cluster_levels(sr_dn, atr=atr, k=0.7)
+
     coef = 1.0
     if flags["riding_upper"]:
         coef *= 0.7
     if flags["bb_squeeze"]:
         coef *= 1.3
 
-    eta_bands = eta_for_bands(close, bands, atr, tf_hours, coef)
+    eta_up = eta_for_bands(close, bands_up, atr, tf_hours, coef)
+    eta_dn = eta_for_bands(close, bands_dn, atr, tf_hours, coef)
+
     volc = volume_confirmations(df)
     soft = soft_sr_levels(df)
     cndl = candle_flags(df)
@@ -402,8 +450,9 @@ def build_struct_json(
         },
         # SR cứng + SR mềm
         "levels": {**sr, "soft_sr": soft},
-        "targets": {"up_bands": bands},
-        "eta_hint": {"method": "ATR", "per": "bar", "up_bands": eta_bands},
+        # ---- cập nhật targets & eta đối xứng ----
+        "targets": {"up_bands": bands_up, "down_bands": bands_dn},
+        "eta_hint": {"method": "ATR", "per": "bar", "up_bands": eta_up, "down_bands": eta_dn},
         "confirmations": {"volume": volc, "candles": cndl},
         # Sự kiện: breakout + breakdown + cờ volume cho cả hai chiều
         "events": {
