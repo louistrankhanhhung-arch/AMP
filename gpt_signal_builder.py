@@ -3,23 +3,53 @@ import os
 import json
 import time
 from typing import Any, Dict, List, Optional
+from datetime import datetime
 
 from openai import OpenAI
 
 # ==== Debug helpers (from performance_logger) ====
 # Bật bằng ENV: DEBUG_GPT_INPUT=1 (và tuỳ chọn DEBUG_GPT_DIR)
 try:
-    from performance_logger import debug_dump_gpt_input, debug_print_gpt_input
+    from performance_logger import debug_dump_gpt_input, debug_print_gpt_input  # type: ignore
 except Exception:
-    # fallback no-op nếu chưa có helper (tránh lỗi import khi chạy unit test)
-    def debug_dump_gpt_input(symbol: str, ctx: Dict[str, Any], tag: str = "ctx") -> None: ...
-    def debug_print_gpt_input(ctx: Dict[str, Any]) -> None: ...
+    # ---- Fallback: tự in/ghi file nếu thiếu helper ----
+    def _debug_enabled() -> bool:
+        return os.getenv("DEBUG_GPT_INPUT", "0") == "1"
+
+    def debug_print_gpt_input(ctx: Dict[str, Any]) -> None:
+        if not _debug_enabled():
+            return
+        try:
+            txt = json.dumps(ctx, ensure_ascii=False, indent=2)
+            # Tránh log quá dài: cắt ~150KB
+            MAX_LEN = 150_000
+            if len(txt) > MAX_LEN:
+                txt = txt[:MAX_LEN] + "\n... [truncated]"
+            print("[DEBUG GPT INPUT] context:\n", txt)
+        except Exception:
+            pass
+
+    def debug_dump_gpt_input(symbol: str, ctx: Dict[str, Any], tag: str = "ctx") -> None:
+        if not _debug_enabled():
+            return
+        try:
+            out_dir = os.getenv("DEBUG_GPT_DIR", "/mnt/data/gpt_inputs")
+            os.makedirs(out_dir, exist_ok=True)
+            ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+            safe_sym = (symbol or "SYMBOL").replace("/", "")
+            path = os.path.join(out_dir, f"{safe_sym}_{tag}_{ts}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(ctx, f, ensure_ascii=False, indent=2)
+            print(f"[DEBUG] saved GPT input -> {path}")
+        except Exception:
+            pass
 
 # ====== Config ======
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # dùng gpt-4o theo yêu cầu
 client = OpenAI()
 
 # ====== Schema output mong đợi từ GPT ======
+// keep the rest of the user-supplied code
 CLASSIFY_SCHEMA = {
     "symbol": "BTC/USDT",
     "decision": "ENTER | WAIT | AVOID",
@@ -149,8 +179,8 @@ def build_messages_classify(
     # === DEBUG: in & ghi JSON đầu vào GPT khi DEBUG_GPT_INPUT=1 ===
     try:
         sym_for_dump = _safe(struct_4h, "symbol") or _safe(struct_1d, "symbol") or _safe(trigger_1h, "symbol") or "SYMBOL"
-        debug_print_gpt_input(ctx)
-        debug_dump_gpt_input(sym_for_dump, ctx, tag="ctx")
+        debug_print_gpt_input(ctx)                  # in ra log
+        debug_dump_gpt_input(sym_for_dump, ctx, tag="ctx")  # ghi file (nếu bật)
     except Exception:
         # không để debug làm hỏng flow chính
         pass
@@ -229,14 +259,11 @@ def make_telegram_signal(
         if decision_str == "ENTER":
             telegram_text = _render_simple_signal(symbol, decision)
         elif decision_str in ("WAIT", "AVOID"):
-            # Không gửi Telegram ở đây; main sẽ chỉ log
             telegram_text = None
         else:
-            # Bất ngờ/khác → coi như WAIT
             decision["decision"] = "WAIT"
             telegram_text = None
 
-        # Gợi ý "plan" tối giản cho dòng post/track (nếu ai đó vẫn cần dùng)
         plan = None
         if decision["decision"] == "ENTER":
             plan = {
