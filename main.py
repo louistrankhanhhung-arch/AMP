@@ -1,6 +1,5 @@
 import os, threading, time, logging
 import json
-import time
 import traceback
 from typing import List, Dict, Any, Iterable
 from datetime import datetime
@@ -8,12 +7,11 @@ from datetime import datetime
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-# ====== modules trong repo của bạn ======
+# ====== modules trong repo ======
 from kucoin_api import fetch_batch
 from indicators import enrich_indicators
 from structure_engine import build_struct_json
 from universe import resolve_symbols
-
 from gpt_signal_builder import make_telegram_signal
 
 # (tuỳ chọn đăng Telegram & nối dây tracker — giữ nguyên nếu đã dùng)
@@ -24,40 +22,16 @@ try:
 except Exception:
     TgSignal = DailyQuotaPolicy = post_signal = TelegramNotifier = PostRef = SignalTracker = None
 
+# ---- Logging ----
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+# ====== FastAPI app (chỉ tạo 1 lần) ======
 app = FastAPI()
-
-SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "15"))
-
-@app.get("/health")
-def health():
-    return {"ok": True, "ts": time.time()}
-
-def _scan_loop():
-    logging.info(f"[scheduler] start: interval={SCAN_INTERVAL_MIN} min")
-    while True:
-        try:
-            # gọi hàm quét của bạn, ví dụ:
-            # scan_once_for_logs()
-            ...
-            logging.info("[scan] done")
-        except Exception as e:
-            logging.exception(f"[scan] error: {e}")
-        time.sleep(SCAN_INTERVAL_MIN * 15)
-
-@app.on_event("startup")
-def _on_startup():
-    t = threading.Thread(target=_scan_loop, daemon=True)
-    t.start()
-    app.state.scan_thread = t
-    logging.info("[scheduler] thread spawned")
-
-# ====== FastAPI app ======
-app = FastAPI()
-
 
 # ====== Cấu hình ======
-SCAN_TFS = os.getenv("SCAN_TFS", "1H,4H,1D")  # đã đổi mặc định: có 1H
-MAX_GPT = int(os.getenv("MAX_GPT", "10"))     # giới hạn số mã gửi GPT mỗi vòng để kiểm soát chi phí
+SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "15"))
+SCAN_TFS = os.getenv("SCAN_TFS", "1H,4H,1D")  # quét 1H/4H/1D
+MAX_GPT = int(os.getenv("MAX_GPT", "10"))
 EXCHANGE = os.getenv("EXCHANGE", "KUCOIN")
 
 # Telegram (nếu muốn post)
@@ -75,25 +49,23 @@ if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID and TgSignal and DailyQuotaPolicy 
         _NOTIFIER = TelegramNotifier(token=TELEGRAM_BOT_TOKEN, default_chat_id=TELEGRAM_CHANNEL_ID)
         _BOT = _NOTIFIER.bot  # raw TeleBot instance
         _TRACKER = SignalTracker(_NOTIFIER)
+        logging.info("[telegram] bot & tracker ready")
     except Exception as e:
         print("[telegram] init error:", e)
         _NOTIFIER = None
         _BOT = None
         _TRACKER = None
 
+@app.get("/health")
+def health():
+    return {"ok": True, "ts": time.time()}
 
 # ====== Utils ======
 def _chunk(lst: List[Any], n: int) -> Iterable[List[Any]]:
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
-
 def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
-    """
-    Build struct JSON cho 3 khung 1H/4H/1D của mỗi symbol.
-    Sử dụng indicators/enrich_indicators + structure_engine.build_struct_json (như bạn đã có).
-    """
-    # fetch theo batch để tiết kiệm call
     dfs_1h = fetch_batch(symbols, "1H")
     dfs_4h = fetch_batch(symbols, "4H")
     dfs_1d = fetch_batch(symbols, "1D")
@@ -122,11 +94,7 @@ def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
             traceback.print_exc()
     return out
 
-
 def _pick_round_robin(symbols: List[str], k: int) -> List[str]:
-    """
-    Chọn k mã kiểu round-robin dựa trên epoch giờ hiện tại (đơn giản).
-    """
     if not symbols:
         return []
     base = int(time.time() // 3600)  # thay đổi mỗi giờ
@@ -134,28 +102,17 @@ def _pick_round_robin(symbols: List[str], k: int) -> List[str]:
     order = symbols[start:] + symbols[:start]
     return order[:max(0, k)]
 
-
 # ====== Scan ======
 def scan_once_for_logs():
-    """
-    NO-FILTER, NO-TRIGGER:
-    - Build struct 1H/4H/1D cho toàn bộ universe
-    - Gửi GPT để xếp loại ENTER/WAIT/AVOID (và build setup khi ENTER)
-    - ENTER: (tuỳ chọn) post Telegram + mở tracker
-    - WAIT/AVOID: log
-    """
     start_ts = datetime.utcnow().isoformat() + "Z"
-    syms = resolve_symbols("")  # lấy danh sách 30 mã từ universe.py (ENV-first nếu có)
+    syms = resolve_symbols("")
     if not syms:
         print("[scan] no symbols")
         return
 
     print(f"[scan] total symbols={len(syms)} exchange={EXCHANGE} tfs={SCAN_TFS}")
 
-    # 1) Build structs
     structs = _build_structs_for(syms)
-
-    # 2) Chọn danh sách gửi GPT theo round-robin (không filter cứng)
     picked = _pick_round_robin([x["symbol"] for x in structs], MAX_GPT)
     print(f"[scan] candidates(no-filter)={picked} (cap {MAX_GPT})")
 
@@ -169,14 +126,12 @@ def scan_once_for_logs():
                 print(f"[scan] missing structs: {sym} (need 1H/4H/1D)")
                 continue
 
-            # 3) Gọi GPT-4o: truyền 1H full struct (tham số trigger_1h giữ API cũ nhưng là struct 1H)
             out = make_telegram_signal(s4h, s1d, trigger_1h=s1h)
 
             if not out.get("ok"):
                 print(f"[scan] GPT err {sym}: {out.get('error')}")
                 continue
 
-            # 4) Log kết quả & (tuỳ chọn) post Telegram
             tele = out.get("telegram_text")
             decision = out.get("decision") or {}
             act = str(decision.get("action") or "N/A").upper()
@@ -190,14 +145,12 @@ def scan_once_for_logs():
 
             if out.get("analysis_text"):
                 print("[analysis]\n" + out["analysis_text"])
-
             sent += 1
 
             meta = out.get("meta", {})
             rr = meta.get("rr", {})
             print(f"[meta] {sym} conf={meta.get('confidence')} rr_min={rr.get('rr_min')} rr_max={rr.get('rr_max')} eta={meta.get('eta')}")
 
-            # ==== Tuỳ chọn: Post Telegram & nối dây tracker ====
             if tele and _BOT and _NOTIFIER and TgSignal and DailyQuotaPolicy and post_signal:
                 plan = out.get("plan") or out.get("signal") or {}
                 tg_sig = TgSignal(
@@ -215,37 +168,28 @@ def scan_once_for_logs():
                 policy = DailyQuotaPolicy(db_path=POLICY_DB, key=POLICY_KEY)
                 info = post_signal(bot=_BOT, channel_id=TELEGRAM_CHANNEL_ID, sig=tg_sig, policy=policy)
                 if info and _TRACKER and PostRef:
-                    # Sau khi post xong:
                     post_ref = PostRef(chat_id=info["chat_id"], message_id=info["message_id"])
-                    
-                    # Chuẩn hoá payload theo kỳ vọng của tracker:
                     signal_payload = {
-                        "symbol": sym,                          # "AVAX/USDT"
-                        "side": tg_sig.side,                    # "long"|"short"
-                        "entries": tg_sig.entries or [],        # [ ... ]
-                        "stop": tg_sig.sl,                      # float
-                        "tps": tg_sig.tps or [],                # [ ... ]
-                        "leverage": tg_sig.leverage,            # ví dụ "x5" (tuỳ bạn)
+                        "symbol": sym,
+                        "side": tg_sig.side,
+                        "entries": tg_sig.entries or [],
+                        "stop": tg_sig.sl,
+                        "tps": tg_sig.tps or [],
+                        "leverage": tg_sig.leverage,
                     }
-                    
-                    # Map sl_mode: nếu plan trả "hard" thì tracker dùng "tick"
-                    sl_mode = plan.get("sl_mode", "tick")
+                    sl_mode = (plan.get("sl_mode") or "tick")
                     if sl_mode == "hard":
                         sl_mode = "tick"
-                    
                     _TRACKER.register_post(
                         signal_id=tg_sig.signal_id,
                         ref=post_ref,
                         signal=signal_payload,
-                        sl_mode=sl_mode,                        # "tick" | "close_4h"
+                        sl_mode=sl_mode,
                     )
-
-
         except Exception as e:
             print(f"[scan] error processing {sym}: {e}")
             traceback.print_exc()
 
-    # 5) Lưu log gộp vòng quét
     try:
         os.makedirs("/mnt/data/gpt_logs", exist_ok=True)
         with open(f"/mnt/data/gpt_logs/scan_{int(time.time())}.meta.json", "w", encoding="utf-8") as f:
@@ -253,12 +197,28 @@ def scan_once_for_logs():
     except Exception as e:
         print("[scan] write log error:", e)
 
+# ====== Scheduler background ======
+def _scan_loop():
+    logging.info(f"[scheduler] start: interval={SCAN_INTERVAL_MIN} min")
+    while True:
+        try:
+            scan_once_for_logs()
+            logging.info("[scan] done")
+        except Exception as e:
+            logging.exception(f"[scan] error: {e}")
+        time.sleep(SCAN_INTERVAL_MIN * 60)  # phút → giây
 
-# ====== API & CLI nho nhỏ ======
+@app.on_event("startup")
+def _on_startup():
+    t = threading.Thread(target=_scan_loop, daemon=True)
+    t.start()
+    app.state.scan_thread = t
+    logging.info("[scheduler] thread spawned")
+
+# ====== API ======
 class ScanOnceReq(BaseModel):
     symbols: List[str] | None = None
     max_gpt: int | None = None
-
 
 @app.post("/scan_once")
 def api_scan_once(req: ScanOnceReq):
@@ -266,7 +226,6 @@ def api_scan_once(req: ScanOnceReq):
     if req.max_gpt:
         MAX_GPT = req.max_gpt
     if req.symbols:
-        # Cho phép scan subset (debug)
         structs = _build_structs_for(req.symbols)
         for sym in req.symbols:
             s1h = next((x["1H"] for x in structs if x["symbol"] == sym), None)
@@ -277,7 +236,6 @@ def api_scan_once(req: ScanOnceReq):
         return {"ok": True, "count": len(req.symbols)}
     scan_once_for_logs()
     return {"ok": True}
-
 
 if __name__ == "__main__":
     scan_once_for_logs()
