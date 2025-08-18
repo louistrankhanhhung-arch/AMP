@@ -6,6 +6,15 @@ from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
+# ==== Debug helpers (from performance_logger) ====
+# Bật bằng ENV: DEBUG_GPT_INPUT=1 (và tuỳ chọn DEBUG_GPT_DIR)
+try:
+    from performance_logger import debug_dump_gpt_input, debug_print_gpt_input
+except Exception:
+    # fallback no-op nếu chưa có helper (tránh lỗi import khi chạy unit test)
+    def debug_dump_gpt_input(symbol: str, ctx: Dict[str, Any], tag: str = "ctx") -> None: ...
+    def debug_print_gpt_input(ctx: Dict[str, Any]) -> None: ...
+
 # ====== Config ======
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # dùng gpt-4o theo yêu cầu
 client = OpenAI()
@@ -136,6 +145,15 @@ def build_messages_classify(
         "struct_1d": struct_1d,
         "struct_1h": (trigger_1h or {}),
     }
+
+    # === DEBUG: in & ghi JSON đầu vào GPT khi DEBUG_GPT_INPUT=1 ===
+    try:
+        sym_for_dump = _safe(struct_4h, "symbol") or _safe(struct_1d, "symbol") or _safe(trigger_1h, "symbol") or "SYMBOL"
+        debug_print_gpt_input(ctx)
+        debug_dump_gpt_input(sym_for_dump, ctx, tag="ctx")
+    except Exception:
+        # không để debug làm hỏng flow chính
+        pass
 
     system = {
         "role": "system",
