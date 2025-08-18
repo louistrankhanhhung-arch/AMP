@@ -65,17 +65,21 @@ def _chunk(lst: List[Any], n: int) -> Iterable[List[Any]]:
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
-def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
-    dfs_1h = fetch_batch(symbols, "1H")
-    dfs_4h = fetch_batch(symbols, "4H")
-    dfs_1d = fetch_batch(symbols, "1D")
+# --- thay toàn bộ hàm _build_structs_for trong main.py bằng đoạn dưới ---
+from kucoin_api import fetch_ohlcv  # đã được import ở đầu file
 
+def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
+    """
+    Lấy OHLCV cho mỗi symbol ở 3 khung 1H/4H/1D (không dùng fetch_batch của kucoin_api,
+    vì hàm đó nhận 1 symbol + list timeframe).
+    """
     out: List[Dict[str, Any]] = []
     for sym in symbols:
         try:
-            df1h = enrich_indicators(dfs_1h.get(sym))
-            df4h = enrich_indicators(dfs_4h.get(sym))
-            df1d = enrich_indicators(dfs_1d.get(sym))
+            # lấy dữ liệu từng khung
+            df1h = enrich_indicators(fetch_ohlcv(sym, timeframe="1H", limit=300))
+            df4h = enrich_indicators(fetch_ohlcv(sym, timeframe="4H", limit=300))
+            df1d = enrich_indicators(fetch_ohlcv(sym, timeframe="1D", limit=300))
 
             if df1h is None or df4h is None or df1d is None:
                 print(f"[build] missing df for {sym}")
