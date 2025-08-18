@@ -3,53 +3,24 @@ import os
 import json
 import time
 from typing import Any, Dict, List, Optional
-from datetime import datetime
 
 from openai import OpenAI
 
 # ==== Debug helpers (from performance_logger) ====
 # Bật bằng ENV: DEBUG_GPT_INPUT=1 (và tuỳ chọn DEBUG_GPT_DIR)
 try:
-    from performance_logger import debug_dump_gpt_input, debug_print_gpt_input  # type: ignore
+    from performance_logger import debug_dump_gpt_input, debug_print_gpt_input
 except Exception:
-    # ---- Fallback: tự in/ghi file nếu thiếu helper ----
-    def _debug_enabled() -> bool:
-        return os.getenv("DEBUG_GPT_INPUT", "0") == "1"
+    # fallback no-op nếu chưa có helper (tránh lỗi import khi chạy unit test)
+    def debug_dump_gpt_input(symbol: str, ctx: Dict[str, Any], tag: str = "ctx") -> None: ...
+    def debug_print_gpt_input(ctx: Dict[str, Any]) -> None: ...
 
-    def debug_print_gpt_input(ctx: Dict[str, Any]) -> None:
-        if not _debug_enabled():
-            return
-        try:
-            txt = json.dumps(ctx, ensure_ascii=False, indent=2)
-            # Tránh log quá dài: cắt ~150KB
-            MAX_LEN = 150_000
-            if len(txt) > MAX_LEN:
-                txt = txt[:MAX_LEN] + "\n... [truncated]"
-            print("[DEBUG GPT INPUT] context:\n", txt)
-        except Exception:
-            pass
-
-    def debug_dump_gpt_input(symbol: str, ctx: Dict[str, Any], tag: str = "ctx") -> None:
-        if not _debug_enabled():
-            return
-        try:
-            out_dir = os.getenv("DEBUG_GPT_DIR", "/mnt/data/gpt_inputs")
-            os.makedirs(out_dir, exist_ok=True)
-            ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-            safe_sym = (symbol or "SYMBOL").replace("/", "")
-            path = os.path.join(out_dir, f"{safe_sym}_{tag}_{ts}.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(ctx, f, ensure_ascii=False, indent=2)
-            print(f"[DEBUG] saved GPT input -> {path}")
-        except Exception:
-            pass
 
 # ====== Config ======
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # dùng gpt-4o theo yêu cầu
 client = OpenAI()
 
 # ====== Schema output mong đợi từ GPT ======
-// keep the rest of the user-supplied code
 CLASSIFY_SCHEMA = {
     "symbol": "BTC/USDT",
     "decision": "ENTER | WAIT | AVOID",
@@ -59,13 +30,14 @@ CLASSIFY_SCHEMA = {
     "entry": [0.0],   # hoặc "entries"
     "entries": [0.0],
     "sl": 0.0,
-    "tp": [0.0, 0.0], # hoặc "tps"
+    "tp": [0.0, 0.0],  # hoặc "tps"
     "tps": [0.0, 0.0],
     "reasons": ["..."],
     "trigger_hint": "nếu WAIT: nêu điều kiện kích hoạt",
     "leverage": None,
-    "eta": None
+    "eta": None,
 }
+
 
 # ====== Helpers ======
 def _safe(d: Optional[Dict], *keys, default=None):
@@ -76,11 +48,13 @@ def _safe(d: Optional[Dict], *keys, default=None):
         cur = cur.get(k)
     return default if cur is None else cur
 
+
 def _parse_json_from_text(txt: str) -> Dict[str, Any]:
     """
     Cố gắng tách JSON từ nội dung GPT trả về (hỗ trợ có/không code fence).
     """
     t = (txt or "").strip()
+
     # code fence
     if t.startswith("```"):
         # loại bỏ fence, cả '```json'
@@ -89,18 +63,21 @@ def _parse_json_from_text(txt: str) -> Dict[str, Any]:
             p = t.find("{")
             if p != -1:
                 t = t[p:]
+
     # tìm block {...} lớn nhất
     try:
         start, end = t.find("{"), t.rfind("}")
         if start >= 0 and end > start:
-            return json.loads(t[start:end+1])
+            return json.loads(t[start:end + 1])
     except Exception:
         pass
+
     # fallback: thử parse trực tiếp
     try:
         return json.loads(t)
     except Exception:
         return {}
+
 
 def _render_simple_signal(symbol: str, decision: Dict[str, Any]) -> str:
     """
@@ -130,10 +107,11 @@ def _render_simple_signal(symbol: str, decision: Dict[str, Any]) -> str:
         f"{direction} | {symbol.replace('/', '')}",
         f"Leverage: {leverage if leverage is not None else '-'}",
         f"Entry: {_fmt_list(entries)}",
-        f"SL: {('-' if sl is None else (f'{float(sl):.6f}' if isinstance(sl,(int,float,str)) else str(sl)))}",
+        f"SL: {('-' if sl is None else (f'{float(sl):.6f}' if isinstance(sl, (int, float, str)) else str(sl)))}",
         f"TP: {_fmt_list(tps)}",
     ]
     return "\n".join(body)
+
 
 def _analysis_text(symbol: str, decision: Dict[str, Any]) -> str:
     """
@@ -161,6 +139,7 @@ def _analysis_text(symbol: str, decision: Dict[str, Any]) -> str:
         return hdr + "\n" + "\n".join(bullets)
     return hdr
 
+
 # ====== Prompt xây dựng ======
 def build_messages_classify(
     struct_4h: Dict[str, Any],
@@ -178,9 +157,14 @@ def build_messages_classify(
 
     # === DEBUG: in & ghi JSON đầu vào GPT khi DEBUG_GPT_INPUT=1 ===
     try:
-        sym_for_dump = _safe(struct_4h, "symbol") or _safe(struct_1d, "symbol") or _safe(trigger_1h, "symbol") or "SYMBOL"
-        debug_print_gpt_input(ctx)                  # in ra log
-        debug_dump_gpt_input(sym_for_dump, ctx, tag="ctx")  # ghi file (nếu bật)
+        sym_for_dump = (
+            _safe(struct_4h, "symbol")
+            or _safe(struct_1d, "symbol")
+            or _safe(trigger_1h, "symbol")
+            or "SYMBOL"
+        )
+        debug_print_gpt_input(ctx)
+        debug_dump_gpt_input(sym_for_dump, ctx, tag="ctx")
     except Exception:
         # không để debug làm hỏng flow chính
         pass
@@ -191,7 +175,8 @@ def build_messages_classify(
             "Bạn là trader kỹ thuật. Hãy phân loại một mã thành ENTER / WAIT / AVOID "
             "dựa trên JSON 3 khung **1D / 4H / 1H (đầy đủ)**.\n"
             "Quy tắc:\n"
-            "- ENTER: 1D–4H–1H đồng pha và có xác nhận (breakout/reclaim/retest) với volume ủng hộ; R:R hợp lý theo targets/levels → cung cấp Entry/SL/TP.\n"
+            "- ENTER: 1D–4H–1H đồng pha và có xác nhận (breakout/reclaim/retest) với volume ủng hộ; "
+            "R:R hợp lý theo targets/levels → cung cấp Entry/SL/TP.\n"
             "- WAIT: xu hướng lớn ủng hộ nhưng thiếu xác nhận 1H → chỉ log, kèm trigger_hint (điểm/kịch bản kích hoạt cụ thể).\n"
             "- AVOID: đi ngược 1D rõ rệt, hoặc R:R xấu/levels tắc/thiếu thanh khoản → log lý do ngắn.\n"
             "Chấp nhận RSI>70/<30 nếu đi cùng breakout có volume (không loại oan). "
@@ -207,6 +192,7 @@ def build_messages_classify(
         ],
     }
     return [system, user]
+
 
 # ====== Hàm chính: trả về telegram_text/analysis_text theo yêu cầu ======
 def make_telegram_signal(
@@ -234,7 +220,12 @@ def make_telegram_signal(
             return {"ok": False, "error": "GPT không trả JSON hợp lệ", "raw": raw}
 
         # Chuẩn hoá fields
-        symbol = data.get("symbol") or _safe(struct_4h, "symbol") or _safe(struct_1d, "symbol") or "SYMBOL"
+        symbol = (
+            data.get("symbol")
+            or _safe(struct_4h, "symbol")
+            or _safe(struct_1d, "symbol")
+            or "SYMBOL"
+        )
         decision_str = (data.get("decision") or data.get("action") or "WAIT").upper()
         side = (data.get("side") or "long").lower()
 
@@ -261,13 +252,15 @@ def make_telegram_signal(
         elif decision_str in ("WAIT", "AVOID"):
             telegram_text = None
         else:
+            # Bất ngờ/khác → coi như WAIT
             decision["decision"] = "WAIT"
             telegram_text = None
 
+        # Gợi ý "plan" tối giản cho dòng post/track
         plan = None
         if decision["decision"] == "ENTER":
             plan = {
-                "signal_id": f"{symbol.replace('/','')}-{int(time.time())}",
+                "signal_id": f"{symbol.replace('/', '')}-{int(time.time())}",
                 "timeframe": "4H",
                 "side": decision["side"],
                 "strategy": decision.get("strategy") or "GPT-plan",
@@ -281,8 +274,8 @@ def make_telegram_signal(
         return {
             "ok": True,
             "signal_id": plan and plan["signal_id"],
-            "telegram_text": telegram_text,     # chỉ có khi ENTER
-            "analysis_text": analysis_text,     # luôn có
+            "telegram_text": telegram_text,   # chỉ có khi ENTER
+            "analysis_text": analysis_text,   # luôn có
             "decision": {
                 "action": decision["decision"],
                 "side": decision["side"],
@@ -296,8 +289,11 @@ def make_telegram_signal(
                 "leverage": decision.get("leverage"),
                 "eta": decision.get("eta"),
             },
-            "plan": plan,                       # chỉ khi ENTER
-            "meta": {"confidence": decision.get("confidence"), "eta": decision.get("eta")},
+            "plan": plan,   # chỉ khi ENTER
+            "meta": {
+                "confidence": decision.get("confidence"),
+                "eta": decision.get("eta"),
+            },
         }
 
     except Exception as e:
