@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import datetime, timedelta
 
-DB = ":memory:"  # replace with file path in production
+DB = os.getenv("MEMBERSHIP_DB", "/mnt/data/membership.sqlite3")
 
 def _conn():
     c = sqlite3.connect(DB, detect_types=sqlite3.PARSE_DECLTYPES)
