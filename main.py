@@ -98,13 +98,45 @@ def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
             traceback.print_exc()
     return out
 
+# ====== Round-Robin bền (Cách B) ======
+RR_PTR_FILE = os.getenv("RR_PTR_FILE", "/mnt/data/rr_ptr.json")
+RR_LOCK = threading.Lock()
+
+def _load_rr_ptr(n_symbols: int) -> int:
+    """Đọc con trỏ round-robin từ file; trả 0 nếu chưa có."""
+    if n_symbols <= 0:
+        return 0
+    try:
+        if os.path.exists(RR_PTR_FILE):
+            with open(RR_PTR_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                ptr = int(data.get("ptr", 0))
+                return max(0, ptr) % n_symbols
+    except Exception as e:
+        logging.warning(f"[rr] load ptr error: {e}")
+    return 0
+
+def _save_rr_ptr(ptr: int) -> None:
+    """Ghi con trỏ round-robin ra file (best-effort)."""
+    try:
+        os.makedirs(os.path.dirname(RR_PTR_FILE), exist_ok=True)
+        with open(RR_PTR_FILE, "w", encoding="utf-8") as f:
+            json.dump({"ptr": int(ptr)}, f)
+    except Exception as e:
+        logging.warning(f"[rr] save ptr error: {e}")
+
 def _pick_round_robin(symbols: List[str], k: int) -> List[str]:
-    if not symbols:
+    """Chọn k mã theo con trỏ lưu file; lần sau tiếp tục từ vị trí mới (bền qua restart)."""
+    if not symbols or k <= 0:
         return []
-    base = int(time.time() // 3600)  # thay đổi mỗi giờ
-    start = base % len(symbols)
-    order = symbols[start:] + symbols[:start]
-    return order[:max(0, k)]
+    with RR_LOCK:
+        n = len(symbols)
+        ptr = _load_rr_ptr(n)
+        order = symbols[ptr:] + symbols[:ptr]
+        picked = order[:min(k, n)]
+        new_ptr = (ptr + len(picked)) % n
+        _save_rr_ptr(new_ptr)
+    return picked
 
 # ====== Scan ======
 def scan_once_for_logs():
