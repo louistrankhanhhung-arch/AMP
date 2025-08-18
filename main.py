@@ -1,4 +1,4 @@
-import os
+import os, threading, time, logging
 import json
 import time
 import traceback
@@ -24,6 +24,32 @@ try:
 except Exception:
     TgSignal = DailyQuotaPolicy = post_signal = TelegramNotifier = PostRef = SignalTracker = None
 
+app = FastAPI()
+
+SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "15"))
+
+@app.get("/health")
+def health():
+    return {"ok": True, "ts": time.time()}
+
+def _scan_loop():
+    logging.info(f"[scheduler] start: interval={SCAN_INTERVAL_MIN} min")
+    while True:
+        try:
+            # gọi hàm quét của bạn, ví dụ:
+            # scan_once_for_logs()
+            ...
+            logging.info("[scan] done")
+        except Exception as e:
+            logging.exception(f"[scan] error: {e}")
+        time.sleep(SCAN_INTERVAL_MIN * 15)
+
+@app.on_event("startup")
+def _on_startup():
+    t = threading.Thread(target=_scan_loop, daemon=True)
+    t.start()
+    app.state.scan_thread = t
+    logging.info("[scheduler] thread spawned")
 
 # ====== FastAPI app ======
 app = FastAPI()
