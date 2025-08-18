@@ -48,7 +48,7 @@ if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID and TgSignal and DailyQuotaPolicy 
     try:
         _NOTIFIER = TelegramNotifier(token=TELEGRAM_BOT_TOKEN, default_chat_id=TELEGRAM_CHANNEL_ID)
         _BOT = _NOTIFIER.bot  # raw TeleBot instance
-        _TRACKER = SignalTracker()
+        _TRACKER = SignalTracker(_NOTIFIER)
     except Exception as e:
         print("[telegram] init error:", e)
         _NOTIFIER = None
@@ -189,17 +189,31 @@ def scan_once_for_logs():
                 policy = DailyQuotaPolicy(db_path=POLICY_DB, key=POLICY_KEY)
                 info = post_signal(bot=_BOT, channel_id=TELEGRAM_CHANNEL_ID, sig=tg_sig, policy=policy)
                 if info and _TRACKER and PostRef:
+                    # Sau khi post xong:
                     post_ref = PostRef(chat_id=info["chat_id"], message_id=info["message_id"])
-                    _TRACKER.open_signal(
+                    
+                    # Chuẩn hoá payload theo kỳ vọng của tracker:
+                    signal_payload = {
+                        "symbol": sym,                          # "AVAX/USDT"
+                        "side": tg_sig.side,                    # "long"|"short"
+                        "entries": tg_sig.entries or [],        # [ ... ]
+                        "stop": tg_sig.sl,                      # float
+                        "tps": tg_sig.tps or [],                # [ ... ]
+                        "leverage": tg_sig.leverage,            # ví dụ "x5" (tuỳ bạn)
+                    }
+                    
+                    # Map sl_mode: nếu plan trả "hard" thì tracker dùng "tick"
+                    sl_mode = plan.get("sl_mode", "tick")
+                    if sl_mode == "hard":
+                        sl_mode = "tick"
+                    
+                    _TRACKER.register_post(
                         signal_id=tg_sig.signal_id,
-                        symbol=sym,
-                        side=tg_sig.side,
-                        entries=tg_sig.entries,
-                        stop=tg_sig.sl,
-                        tps=tg_sig.tps,
-                        post_ref=post_ref,
-                        sl_mode=plan.get("sl_mode", "hard"),
+                        ref=post_ref,
+                        signal=signal_payload,
+                        sl_mode=sl_mode,                        # "tick" | "close_4h"
                     )
+
 
         except Exception as e:
             print(f"[scan] error processing {sym}: {e}")
