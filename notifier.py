@@ -4,25 +4,39 @@ import itertools
 import os
 import requests
 
+try:
+    # Cần pyTelegramBotAPI cho telegram_poster & bot_handlers
+    from telebot import TeleBot
+    from telebot import types as _tb_types  # không dùng trực tiếp ở đây, chỉ để chắc import ok
+    _HAS_TELEBOT = True
+except Exception:
+    _HAS_TELEBOT = False
+
+
 class PostRef(NamedTuple):
     chat_id: str | int
     message_id: int
 
+
 class Notifier:
-    def post(self, chat_id: str|int, text: str) -> PostRef: ...
+    def post(self, chat_id: str | int, text: str) -> PostRef: ...
     def reply(self, ref: PostRef, text: str) -> None: ...
 
-# A. Console Notifier (dùng cho dev/test)
+
+# A. Console Notifier (dev/test)
 class ConsoleNotifier(Notifier):
     _seq = itertools.count(1)
+
     def post(self, chat_id, text):
         mid = next(self._seq)
         print(f"[telegram:post] chat={chat_id} mid={mid}\n{text}")
         return PostRef(chat_id, mid)
+
     def reply(self, ref, text):
         print(f"[telegram:reply] chat={ref.chat_id} reply_to={ref.message_id}\n{text}")
 
-# B. Telegram Notifier (sử dụng Bot API)
+
+# B. Telegram Notifier (HTTP Bot API) + cung cấp .bot = TeleBot thật để tương thích telegram_poster
 class TelegramNotifier(Notifier):
     def __init__(
         self,
@@ -42,7 +56,7 @@ class TelegramNotifier(Notifier):
         if not self.token:
             raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
 
-        # Ưu tiên tham số truyền vào, sau đó tới ENV (hỗ trợ cả TELEGRAM_CHANNEL_ID & TELEGRAM_CHAT_ID)
+        # Ưu tiên tham số truyền vào, sau đó tới ENV
         self.default_chat = (
             default_chat
             or default_chat_id
@@ -55,12 +69,21 @@ class TelegramNotifier(Notifier):
             raise RuntimeError("Missing TELEGRAM_CHANNEL_ID/TELEGRAM_CHAT_ID or default_chat")
 
         # Tuỳ chọn gửi
-        self.parse_mode = parse_mode if parse_mode is not None else "HTML"
+        self.parse_mode = "HTML" if parse_mode is None else parse_mode
         self.disable_web_page_preview = True if disable_web_page_preview is None else bool(disable_web_page_preview)
         self.timeout = 10.0 if timeout is None else float(timeout)
 
         self.base = f"https://api.telegram.org/bot{self.token}"
 
+        # === TeleBot instance để dùng cho telegram_poster ===
+        if not _HAS_TELEBOT:
+            raise RuntimeError(
+                "pyTelegramBotAPI (telebot) chưa được cài. "
+                "Cài đặt: pip install pyTelegramBotAPI"
+            )
+        self.bot = TeleBot(self.token, parse_mode=None)  # parse_mode set tại send_message từng lần
+
+    # ---- HTTP helpers (vẫn giữ để có thể dùng Notifier.post/reply nếu muốn) ----
     def _send(self, method: str, data: dict) -> dict:
         r = requests.post(f"{self.base}/{method}", data=data, timeout=self.timeout)
         r.raise_for_status()
