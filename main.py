@@ -1,7 +1,8 @@
 import os, threading, time, logging
 import json
 import traceback
-from typing import List, Dict, Any, Iterable
+import math
+from typing import List, Dict, Any, Iterable, Optional
 from datetime import datetime
 
 from fastapi import FastAPI
@@ -29,10 +30,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 app = FastAPI()
 
 # ====== Cấu hình ======
-SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "15"))
+SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "60"))   # vòng lớn mỗi 60 phút
 SCAN_TFS = os.getenv("SCAN_TFS", "1H,4H,1D")  # quét 1H/4H/1D
 MAX_GPT = int(os.getenv("MAX_GPT", "10"))
 EXCHANGE = os.getenv("EXCHANGE", "KUCOIN")
+
+# Block spacing & phân lô trong 1 giờ
+BLOCKS_PER_HOUR = int(os.getenv("BLOCKS_PER_HOUR", "3"))
+BLOCK_SPACING_MIN = int(os.getenv("BLOCK_SPACING_MIN", "5"))
 
 # Telegram (nếu muốn post)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -126,7 +131,7 @@ def _save_rr_ptr(ptr: int) -> None:
         logging.warning(f"[rr] save ptr error: {e}")
 
 def _pick_round_robin(symbols: List[str], k: int) -> List[str]:
-    """Chọn k mã theo con trỏ lưu file; lần sau tiếp tục từ vị trí mới (bền qua restart)."""
+    """Fallback: chọn k mã theo con trỏ lưu file (bền qua restart)."""
     if not symbols or k <= 0:
         return []
     with RR_LOCK:
@@ -138,8 +143,15 @@ def _pick_round_robin(symbols: List[str], k: int) -> List[str]:
         _save_rr_ptr(new_ptr)
     return picked
 
+def _split_blocks(symbols: List[str], blocks: int) -> List[List[str]]:
+    """Chia symbols thành `blocks` khối đều nhau (block cuối có thể nhiều/ít hơn 1 đơn vị)."""
+    if blocks <= 1 or not symbols:
+        return [symbols]
+    size = math.ceil(len(symbols) / blocks)
+    return [symbols[i*size:(i+1)*size] for i in range(blocks)]
+
 # ====== Scan ======
-def scan_once_for_logs():
+def scan_once_for_logs(block_idx: Optional[int] = None):
     start_ts = datetime.utcnow().isoformat() + "Z"
     syms = resolve_symbols("")
     if not syms:
@@ -148,12 +160,24 @@ def scan_once_for_logs():
 
     print(f"[scan] total symbols={len(syms)} exchange={EXCHANGE} tfs={SCAN_TFS}")
 
-    structs = _build_structs_for(syms)
-    picked = _pick_round_robin([x["symbol"] for x in structs], MAX_GPT)
-    print(f"[scan] candidates(no-filter)={picked} (cap {MAX_GPT})")
+    # Chia block cố định theo giờ (3 block): ví dụ 30 mã => 10-10-10
+    if block_idx is not None and BLOCKS_PER_HOUR >= 2:
+        blocks = _split_blocks(syms, BLOCKS_PER_HOUR)
+        if block_idx < 0 or block_idx >= len(blocks):
+            print(f"[scan] invalid block_idx={block_idx}, fallback RR")
+            pick_syms = _pick_round_robin(syms, MAX_GPT)
+            print(f"[scan] candidates(no-filter)={pick_syms} (cap {MAX_GPT}) [RR]")
+        else:
+            pick_syms = blocks[block_idx][:MAX_GPT]
+            print(f"[scan] block {block_idx+1}/{BLOCKS_PER_HOUR} -> {len(pick_syms)} symbols (cap {MAX_GPT})")
+    else:
+        pick_syms = _pick_round_robin(syms, MAX_GPT)
+        print(f"[scan] candidates(no-filter)={pick_syms} (cap {MAX_GPT}) [RR]")
+
+    structs = _build_structs_for(pick_syms)
 
     sent = 0
-    for sym in picked:
+    for sym in pick_syms:
         try:
             s1h = next((x["1H"] for x in structs if x["symbol"] == sym), None)
             s4h = next((x["4H"] for x in structs if x["symbol"] == sym), None)
@@ -229,20 +253,41 @@ def scan_once_for_logs():
     try:
         os.makedirs("/mnt/data/gpt_logs", exist_ok=True)
         with open(f"/mnt/data/gpt_logs/scan_{int(time.time())}.meta.json", "w", encoding="utf-8") as f:
-            json.dump({"at": start_ts, "picked": picked, "sent": sent}, f, ensure_ascii=False, indent=2)
+            json.dump({
+                "at": start_ts,
+                "picked": pick_syms,
+                "sent": sent,
+                "block_idx": block_idx,
+                "blocks_per_hour": BLOCKS_PER_HOUR
+            }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print("[scan] write log error:", e)
 
 # ====== Scheduler background ======
 def _scan_loop():
-    logging.info(f"[scheduler] start: interval={SCAN_INTERVAL_MIN} min")
+    logging.info(f"[scheduler] start: interval={SCAN_INTERVAL_MIN} min; blocks_per_hour={BLOCKS_PER_HOUR}; spacing={BLOCK_SPACING_MIN} min")
     while True:
         try:
-            scan_once_for_logs()
-            logging.info("[scan] done")
+            if BLOCKS_PER_HOUR <= 1:
+                # chế độ cũ: mỗi SCAN_INTERVAL_MIN chạy 1 lần
+                scan_once_for_logs()
+                logging.info("[scan] done (single)")
+                time.sleep(SCAN_INTERVAL_MIN * 60)
+            else:
+                # chạy block 0..(n-1), cách nhau BLOCK_SPACING_MIN
+                for i in range(BLOCKS_PER_HOUR):
+                    scan_once_for_logs(block_idx=i)
+                    logging.info(f"[scan] done block {i+1}/{BLOCKS_PER_HOUR}")
+                    if i < BLOCKS_PER_HOUR - 1:
+                        time.sleep(BLOCK_SPACING_MIN * 60)
+                # ngủ phần còn lại của giờ
+                total_span = (BLOCKS_PER_HOUR - 1) * BLOCK_SPACING_MIN
+                remain = max(0, SCAN_INTERVAL_MIN - total_span)
+                logging.info(f"[scheduler] sleeping {remain} min to complete the hour")
+                time.sleep(remain * 60)
         except Exception as e:
             logging.exception(f"[scan] error: {e}")
-        time.sleep(SCAN_INTERVAL_MIN * 60)  # phút → giây
+            time.sleep(10)  # backoff nhẹ
 
 @app.on_event("startup")
 def _on_startup():
@@ -255,11 +300,12 @@ def _on_startup():
 class ScanOnceReq(BaseModel):
     symbols: List[str] | None = None
     max_gpt: int | None = None
+    block_idx: int | None = None   # NEW: chọn block cụ thể 0..BLOCKS_PER_HOUR-1
 
 @app.post("/scan_once")
 def api_scan_once(req: ScanOnceReq):
     global MAX_GPT
-    if req.max_gpt:
+    if req.max_gpt is not None:
         MAX_GPT = req.max_gpt
     if req.symbols:
         structs = _build_structs_for(req.symbols)
@@ -270,8 +316,13 @@ def api_scan_once(req: ScanOnceReq):
             out = make_telegram_signal(s4h, s1d, trigger_1h=s1h)
             print(json.dumps(out, ensure_ascii=False))
         return {"ok": True, "count": len(req.symbols)}
-    scan_once_for_logs()
+    # nếu gọi không truyền symbols: cho phép chọn block thủ công
+    if req.block_idx is not None:
+        scan_once_for_logs(block_idx=req.block_idx)
+    else:
+        scan_once_for_logs()
     return {"ok": True}
 
 if __name__ == "__main__":
-    scan_once_for_logs()
+    # chạy 1 block duy nhất khi chạy trực tiếp (mặc định block 0)
+    scan_once_for_logs(block_idx=0 if BLOCKS_PER_HOUR > 1 else None)
