@@ -201,7 +201,6 @@ def render_teaser(sig: Signal) -> str:
     label = _label_from_tf(sig.timeframe)
     return (
         f"<b>{sig.symbol} {sig.timeframe} ({label})</b>\n"
-        f"Setup: {sig.strategy}\n"
         f"Entry: <tg-spoiler>{lock}</tg-spoiler> | "
         f"SL: <tg-spoiler>{lock}</tg-spoiler> | "
         f"TP: <tg-spoiler>{tps_lock}</tg-spoiler>"
