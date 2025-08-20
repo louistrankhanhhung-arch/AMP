@@ -26,6 +26,49 @@ def _default_scale_out(tps_len: int) -> List[float]:
         return [0.50, 0.50]
     return [1.00]
 
+# === helpers for DM render ===
+def _fmt_num(x) -> str:
+    try:
+        return f"{float(x):g}"
+    except Exception:
+        return str(x)
+
+def _render_full_html_from_signal(sig: Dict[str, Any]) -> str:
+    symbol = sig.get("symbol", "")
+    side = (sig.get("side") or "").upper()
+    lev  = sig.get("leverage") or "-"
+    entries = [_fmt_num(p) for p in (sig.get("entries") or [])]
+    stop    = _fmt_num(sig.get("stop"))
+    tps     = [_fmt_num(p) for p in (sig.get("tps") or [])]
+
+    lines = []
+    lines.append("<b>[signal]</b>")
+    lines.append(f"{side} | {symbol} (Leverage: {lev})")
+    lines.append("")
+    if entries:
+        lines.append(f"<b>Entry:</b> {', '.join(entries)}")
+    lines.append(f"<b>Stop:</b> {stop}")
+    if tps:
+        lines.append(f"<b>TP:</b> {', '.join(tps)}")
+    if sig.get("eta"):
+        lines.append(f"<b>ETA:</b> {sig.get('eta')}")
+    if sig.get("note"):
+        lines.append(f"<b>Note:</b> {sig.get('note')}")
+    return "\n".join(lines)
+
+# Con trỏ tracker toàn cục để DM có thể tra cứu theo signal_id
+_LAST_TRACKER: Optional["SignalTracker"] = None
+
+def render_full_signal_by_id(signal_id: str) -> Optional[str]:
+    """
+    Trả về HTML full signal để dùng trong DM, dựa trên state đang lưu
+    trong SignalTracker hiện tại (_LAST_TRACKER).
+    """
+    st = _LAST_TRACKER.get_state(signal_id) if _LAST_TRACKER else None
+    if not st:
+        return None
+    return _render_full_html_from_signal(st.signal)
+
 
 @dataclass
 class SignalState:
@@ -103,6 +146,9 @@ class SignalTracker:
         self.notifier = notifier
         self.states: Dict[str, SignalState] = {}
         self._by_symbol: Dict[str, str] = {}  # symbol -> last signal_id
+        global _LAST_TRACKER
+        _LAST_TRACKER = self
+        
 
     # ---------- registration ----------
     def register_post(self, signal_id: str, ref: PostRef, signal: Dict[str, Any], sl_mode: str = "tick"):
