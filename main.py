@@ -15,6 +15,9 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from bot_handlers import register_handlers
 
+def _df_ok(df):
+    return (df is not None) and (not getattr(df, "empty", False))
+
 # ====== modules trong repo ======
 try:
     from indicators import enrich_indicators, enrich_more
@@ -173,6 +176,9 @@ def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
 
 # ====== GPT call với exponential backoff ======
 def _call_gpt_with_backoff(s4h, s1d, s1h):
+    # Guard: dữ liệu thiếu/rỗng thì bỏ sớm, tránh dùng DF trong điều kiện
+    if not (_df_ok(s4h) and _df_ok(s1d) and _df_ok(s1h)):
+        return {"ok": False, "error": "missing/empty frame(s)"}
     delay = RATE_SLEEP_SECS
     last_exc = None
     for _ in range(GPT_MAX_RETRIES + 1):
