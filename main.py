@@ -232,15 +232,18 @@ def scan_once_for_logs():
                 out = _call_gpt_with_backoff(s4h, s1d, s1h)
                 time.sleep(RATE_SLEEP_SECS)  # spacing hạ RPM
             
-                tele  = out.get("telegram_text")
-            
+                tele = out.get("telegram_text")
+                analysis_text = out.get("analysis_text") or ""
+                
                 # Lấy các nhánh có thể có trong output
                 plan  = out.get("plan") or out.get("signal") or {}
                 if not plan and isinstance(out.get("enter_plans"), list) and out["enter_plans"]:
                     plan = out["enter_plans"][0] or {}
                 meta  = out.get("meta") or {}
                 plans = out.get("plans") or {}
-            
+                p_intra = plans.get("intraday_1h") or plans.get("intraday") or {}
+                p_swing = plans.get("swing_4h")    or plans.get("swing")    or {}
+                
                 # --- Fallback cho decision/action/side/conf ---
                 decision = out.get("decision") or {}
                 if not decision:
@@ -265,68 +268,76 @@ def scan_once_for_logs():
                             guessed_action = "AVOID"
                         else:
                             guessed_action = intr or swg or "WAIT"
-            
-                        intr_plan = plans.get("intraday_1h") or plans.get("intraday") or {}
-                        swg_plan  = plans.get("swing_4h")    or plans.get("swing")    or {}
-            
-                        side_guess = intr_plan.get("side") or swg_plan.get("side") or "none"
+                
+                        side_guess = (
+                            p_intra.get("side") or p_swing.get("side") or "none"
+                        )
                         conf_guess = (
-                            intr_plan.get("confidence")
-                            or swg_plan.get("confidence")
+                            p_intra.get("confidence")
+                            or p_swing.get("confidence")
                             or meta.get("intraday_conf")
                             or meta.get("swing_conf")
                         )
-            
                         decision = {
                             "action": guessed_action,
                             "side": side_guess,
                             "confidence": conf_guess,
                         }
+                
+                # === Chuẩn hoá biến để log header ===
+                action = str(decision.get("action") or "").upper()
+                if not action:  # bảo đảm header không hiện N/A
+                    intr = str(meta.get("intraday_decision") or "").upper()
+                    swg  = str(meta.get("swing_decision") or "").upper()
+                    action = "WAIT" if "WAIT" in {intr, swg} else ("AVOID" if "AVOID" in {intr, swg} else "N/A")
+                
+                side = (
+                    str(decision.get("side") or "")
+                    or plan.get("side")
+                    or p_intra.get("side")
+                    or p_swing.get("side")
+                    or "none"
+                )
+                conf = (
+                    decision.get("confidence")
+                    or plan.get("confidence")
+                    or meta.get("intraday_conf")
+                    or meta.get("swing_conf")
+                    or p_intra.get("confidence")
+                    or p_swing.get("confidence")
+                )
+                
+                # (tuỳ chọn) Lấy trigger/reason để dùng nếu cần
+                trigger = (
+                    decision.get("trigger")
+                    or plan.get("trigger")
+                    or p_intra.get("trigger_hint")
+                    or p_swing.get("trigger_hint")
+                    or meta.get("trigger_hint")
+                    or meta.get("trigger")
+                )
+                reason = (
+                    decision.get("reason")
+                    or plan.get("reason")
+                    or ((p_intra.get("reasons") or []) + (p_swing.get("reasons") or []) or [None])[0]
+                )
+                
+                # === LOG HEADER + 2 BLOCK PHÂN TÍCH ===
+                print(f"[signal] {sym} | {action} side={side} conf={conf}")
+                if analysis_text:
+                    print("[analysis]\n" + analysis_text)
+                
+                # === Gate: chỉ ENTER mới post Telegram ===
+                if action != "ENTER":
+                    continue
+
             
             except Exception as e:
                 logging.exception(f"[scan] GPT err {sym}: {e}")
                 # Giá trị mặc định khi lỗi GPT để không vỡ luồng
                 decision = {"action": "AVOID", "side": "none", "confidence": 0.0}
             
-            # --- Chuẩn hoá các biến dùng phía sau (ngoài try/except) ---
-            action = str(decision.get("action") or "").upper()
-            side   = str(decision.get("side") or "none")
-            conf   = decision.get("confidence")
-            
-            # ==== Logging theo yêu cầu + Gate ====
-            plan = out.get("plan") or out.get("signal") or {}
-            meta = out.get("meta") or {}
-            
-            trigger = (
-                (decision.get("trigger") if isinstance(decision, dict) else None)
-                or plan.get("trigger")
-                or meta.get("trigger_hint")
-                or meta.get("trigger")
-            )
-            reason = (
-                (decision.get("reason") if isinstance(decision, dict) else None)
-                or plan.get("reason")
-                or meta.get("reason")
-            )
-            
-            def _fmt_num(x):
-                try:
-                    return f"{float(x):g}"
-                except Exception:
-                    return str(x)
-            
-            # --- Gate logic ---
-            if action == "WAIT":
-                print(f"[WAIT] {sym} | side={side} | conf={conf} | trigger={trigger or '-'}")
-                continue
-            elif action == "AVOID":
-                print(f"[AVOID] {sym} | side={side} | reason={reason or '-'}")
-                continue
-            elif action != "ENTER":
-                # chỉ log skip khi action rỗng/không hợp lệ
-                print(f"[post_skip] {sym} action={action or 'N/A'} -> skip")
-                continue
-            
+                    
             # --- Chỉ ENTER mới tới đây: log setup gọn ---
             if tele:
                 print("[signal]\n" + tele)
@@ -349,7 +360,7 @@ def scan_once_for_logs():
                 print("[signal] " + " | ".join(fields))
             
             # (khối post Telegram giữ nguyên ở dưới)
-            if _BOT and _NOTIFIER and TgSignal and post_signal and policy and out.get("ok"):
+            if _BOT and _NOTIFIER and TgSignal and post_signal:
                 entries = plan.get("entries") or []
                 slv = plan.get("sl")
                 if not entries or slv is None:
@@ -384,7 +395,12 @@ def scan_once_for_logs():
                     policy=policy,  # type: ignore
                     join_btn_url=JOIN_URL,
                 )
-
+                
+                # Đếm số tín hiệu đã post
+                if info:
+                    sent += 1
+                
+                # Ghi tracker (nếu có)
                 if info and _TRACKER and PostRef:
                     post_ref = PostRef(chat_id=info["chat_id"], message_id=info["message_id"])  # type: ignore
                     signal_payload = {
@@ -404,6 +420,7 @@ def scan_once_for_logs():
                         signal=signal_payload,
                         sl_mode=sl_mode,
                     )
+
 
         except Exception as e:
             print(f"[scan] error processing {sym}: {e}")
