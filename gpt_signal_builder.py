@@ -7,17 +7,6 @@ from datetime import datetime
 
 from openai import OpenAI
 
-def _clean_reason_for_log(s: str, max_len: int | None = None) -> str:
-    try:
-        s = re.sub(r"[\{\}\[\]]", "", s)
-        s = re.sub(r"\s+", " ", s).strip()
-        if max_len:
-            if len(s) > max_len:
-                s = s[:max_len-3] + "..."
-        return s
-    except Exception:
-        return s
-
 # ==== Debug helpers (from performance_logger) ====
 # Bật bằng ENV: DEBUG_GPT_INPUT=1 (và tuỳ chọn DEBUG_GPT_DIR)
 try:
@@ -239,24 +228,6 @@ def build_messages_classify(
     return [system, user]
 
 # ====== Hàm chính ======
-def _log_line_for_plan(symbol: str, plan: Dict[str, Any], tag: str) -> str:
-    decision = (plan.get("decision") or plan.get("action") or "").upper()
-    if decision == "ENTER":
-        return _render_setup_block(symbol, plan, label=tag)
-    elif decision == "WAIT":
-        hint = plan.get("trigger_hint") or "-"
-        return f"[{tag}] {symbol} | WAIT → Trigger: " + _clean_reason_for_log(str(hint), int(os.getenv("ANALYSIS_REASON_MAX_CHARS", "140")))
-    else:
-        reasons = plan.get("reasons") or []
-        reason = ""
-        for r in reasons:
-            if isinstance(r, str) and r.strip():
-                reason = r
-                break
-        if not reason:
-            reason = plan.get("reason") or plan.get("analysis") or "-"
-        return f"[{tag}] {symbol} | AVOID → Reason: " + _clean_reason_for_log(str(reason), int(os.getenv("ANALYSIS_REASON_MAX_CHARS", "140")))
-
 def make_telegram_signal(
     struct_4h: Dict[str, Any],
     struct_1d: Dict[str, Any],
@@ -360,9 +331,6 @@ def make_telegram_signal(
         # Phần phân tích (gộp 2 block)
         analysis_text = _merge_analysis(symbol, p_intra, p_swing)
 
-        log_intra = _log_line_for_plan(symbol, p_intra, "INTRADAY")
-        log_swing = _log_line_for_plan(symbol, p_swing, "SWING")
-
         return {
             "ok": True,
             "symbol": symbol,
@@ -377,8 +345,6 @@ def make_telegram_signal(
                 "swing_4h": p_swing
             },
             "enter_plans": enter_plans,               # các plan ENTER có nhãn
-            "log_intraday": log_intra,
-            "log_swing": log_swing,
             "meta": {
                 "intraday_decision": p_intra["decision"],
                 "swing_decision": p_swing["decision"],
