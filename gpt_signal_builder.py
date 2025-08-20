@@ -243,10 +243,14 @@ def make_telegram_signal(
     *args,
     **kwargs,
 ) -> Dict[str, Any]:
-    # Guard: dữ liệu thiếu/rỗng thì bỏ sớm
-    if not (_df_ok(s4h) and _df_ok(s1d) and (trigger_1h is None or _df_ok(trigger_1h))):
+    # --- Back-compat aliases: phần thân vẫn dùng struct_* ---
+    struct_4h = s4h
+    struct_1d = s1d
+    struct_1h = trigger_1h
+
+    # Guard: tránh lỗi truth value với DataFrame
+    if not (_df_ok(struct_4h) and _df_ok(struct_1d) and (struct_1h is None or _df_ok(struct_1h))):
         return {"ok": False, "error": "missing/empty frame(s)"}
-    # ... phần thân hàm giữ nguyên ...
     """
     - Gọi GPT-4o với 1H/4H/1D đầy đủ.
     - Nhận 2 kế hoạch: intraday_1h & swing_4h.
