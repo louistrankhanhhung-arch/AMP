@@ -138,9 +138,9 @@ def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
             df4h = enrich_more(enrich_indicators(df4h_raw)) if df4h_raw is not None else None
             df1d = enrich_more(enrich_indicators(df1d_raw)) if df1d_raw is not None else None
 
-            if any(d is None or getattr(d, "empty", False) for d in (df1h, df4h, df1d)):
-            logging.info(f"[build] missing TF for {sym}")
-            continue
+                        if any(d is None or getattr(d, "empty", False) for d in (df1h, df4h, df1d)):
+                logging.info(f"[build] missing TF for {sym}")
+                continue
 
             # Ở đây make_telegram_signal kỳ vọng input dạng struct/df đã enrich
             out.append({
