@@ -293,54 +293,62 @@ def scan_once_for_logs():
             side   = str(decision.get("side") or "none")
             conf   = decision.get("confidence")
             
-            # ==== Logging theo yêu cầu ====
+            # ==== Logging theo yêu cầu + Gate ====
+            plan = out.get("plan") or out.get("signal") or {}
+            meta = out.get("meta") or {}
+            
             trigger = (
-                decision.get("trigger")
+                (decision.get("trigger") if isinstance(decision, dict) else None)
                 or plan.get("trigger")
-                or (meta.get("trigger_hint") if isinstance(meta, dict) else None)
-                or (meta.get("trigger") if isinstance(meta, dict) else None)
+                or meta.get("trigger_hint")
+                or meta.get("trigger")
             )
             reason = (
-                decision.get("reason")
+                (decision.get("reason") if isinstance(decision, dict) else None)
                 or plan.get("reason")
-                or (meta.get("reason") if isinstance(meta, dict) else None)
+                or meta.get("reason")
             )
-
+            
+            def _fmt_num(x):
+                try:
+                    return f"{float(x):g}"
+                except Exception:
+                    return str(x)
+            
+            # --- Gate logic ---
             if action == "WAIT":
                 print(f"[WAIT] {sym} | side={side} | conf={conf} | trigger={trigger or '-'}")
-            elif action == "AVOID":
-                print(f"[AVOID] {sym} | reason={reason or '-'}")
-            else:
-                # ENTER hoặc N/A: in signal nếu có, ưu tiên 1 dòng súc tích nếu thiếu `tele`
-                if tele:
-                    print("[signal]\n" + tele)
-                else:
-                    entries = plan.get("entries") or []
-                    slv = plan.get("sl")
-                    tps = plan.get("tps") or []
-                    lev = plan.get("leverage")
-                    eta = plan.get("eta")
-                    fields = [
-                        f"{sym}",
-                        f"side={plan.get('side') or side}",
-                        f"entry={','.join(map(str, entries))}" if entries else None,
-                        f"sl={slv}" if slv is not None else None,
-                        f"tp={','.join(map(str, tps))}" if tps else None,
-                        f"lev=x{lev}" if lev else None,
-                        f"eta={eta}" if eta else None,
-                    ]
-                    fields = [x for x in fields if x]
-                    print("[signal] " + " | ".join(fields))
-
-            if out.get("analysis_text"):
-                print("[analysis]\n" + out["analysis_text"])  # có thể dài
-            sent += 1
-
-            # >>> Chỉ post khi action == ENTER <<<
-            if action != "ENTER":
-                print(f"[post_skip] {sym} action={action} -> skip")
                 continue
-
+            elif action == "AVOID":
+                print(f"[AVOID] {sym} | side={side} | reason={reason or '-'}")
+                continue
+            elif action != "ENTER":
+                # chỉ log skip khi action rỗng/không hợp lệ
+                print(f"[post_skip] {sym} action={action or 'N/A'} -> skip")
+                continue
+            
+            # --- Chỉ ENTER mới tới đây: log setup gọn ---
+            if tele:
+                print("[signal]\n" + tele)
+            else:
+                entries = [ _fmt_num(p) for p in (plan.get("entries") or []) ]
+                slv     = plan.get("sl")
+                tps     = [ _fmt_num(p) for p in (plan.get("tps") or []) ]
+                lev     = plan.get("leverage")
+                eta     = plan.get("eta")
+                fields = [
+                    f"{sym}",
+                    f"side={plan.get('side') or side}",
+                    f"entry={','.join(entries)}" if entries else None,
+                    f"sl={_fmt_num(slv)}" if slv is not None else None,
+                    f"tp={','.join(tps)}" if tps else None,
+                    f"lev=x{lev}" if lev else None,
+                    f"eta={eta}" if eta else None,
+                ]
+                fields = [x for x in fields if x]
+                print("[signal] " + " | ".join(fields))
+            
+            # (khối post Telegram giữ nguyên ở dưới)
             if _BOT and _NOTIFIER and TgSignal and post_signal and policy and out.get("ok"):
                 entries = plan.get("entries") or []
                 slv = plan.get("sl")
