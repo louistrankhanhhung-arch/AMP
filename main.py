@@ -1,5 +1,5 @@
 # main.py
-# Quét – tạo – post tín hiệu lên Telegram; sửa điều kiện post & truyền join_btn_url
+# Quét – tạo – post tín hiệu lên Telegram; chỉ post khi action == ENTER
 
 import os, threading, time, logging
 import json
@@ -43,7 +43,7 @@ TELEGRAM_CHANNEL_ID = int(os.getenv("TELEGRAM_CHANNEL_ID", "0") or 0)
 POLICY_DB = os.getenv("POLICY_DB", "/mnt/data/policy.sqlite3")
 POLICY_KEY = os.getenv("POLICY_KEY", "global")
 
-# Nút nâng cấp/FAQ thanh toán (hiện dưới bài viết)
+# Nút nâng cấp/FAQ thanh toán (tùy chọn)
 JOIN_URL = os.getenv("JOIN_URL", None)
 
 _BOT = None
@@ -53,7 +53,7 @@ _TRACKER = None
 if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID and TgSignal and DailyQuotaPolicy and post_signal:
     try:
         _NOTIFIER = TelegramNotifier(token=TELEGRAM_BOT_TOKEN, default_chat_id=TELEGRAM_CHANNEL_ID)
-        _BOT = _NOTIFIER.bot  # raw TeleBot instance
+        _BOT = _NOTIFIER.bot
         _TRACKER = SignalTracker(_NOTIFIER)
         logging.info("[telegram] bot & tracker ready")
     except Exception as e:
@@ -79,10 +79,6 @@ from kucoin_api import fetch_ohlcv  # dùng riêng cho 1 symbol/TF
 
 
 def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
-    """
-    Lấy OHLCV cho mỗi symbol ở 3 khung 1H/4H/1D.
-    Bổ sung enrich_more(...) để có thêm candle anatomy, vol_z20, soft MA...
-    """
     out: List[Dict[str, Any]] = []
     for sym in symbols:
         try:
@@ -143,32 +139,55 @@ def scan_once_for_logs():
 
             out = make_telegram_signal(s4h, s1d, trigger_1h=s1h)
 
-            # Log nhanh
             tele = out.get("telegram_text")
             decision = out.get("decision") or {}
-            act = str(decision.get("action") or "N/A").upper()
+            action = str(decision.get("action") or "").upper()
             side = str(decision.get("side") or "none")
             conf = decision.get("confidence")
+
+            # Log ngắn
             if tele:
                 print("[signal]\n" + tele)
             else:
-                print(f"[signal] {sym} | {act} side={side} conf={conf}")
+                print(f"[signal] {sym} | {action or 'N/A'} side={side} conf={conf}")
 
             if out.get("analysis_text"):
                 print("[analysis]\n" + out["analysis_text"])
             sent += 1
 
-            # >>> Điều kiện post: chỉ cần out.ok là đủ (ENTER) <<<
-            if out.get("ok") and _BOT and _NOTIFIER and TgSignal and post_signal and policy:
+            # >>> Chỉ post khi action == ENTER <<<
+            if action != "ENTER":
+                print(f"[post_skip] {sym} action={action} -> skip")
+                continue
+
+            if _BOT and _NOTIFIER and TgSignal and post_signal and policy and out.get("ok"):
                 plan = out.get("plan") or out.get("signal") or {}
+
+                # Yêu cầu tối thiểu để post
+                entries = plan.get("entries") or []
+                slv = plan.get("sl")
+                if not entries or slv is None:
+                    print(f"[post_skip] {sym} missing entries/sl -> skip")
+                    continue
+
+                # Lấy strategy chuẩn (hạn chế 'GPT-plan')
+                meta = out.get("meta") or {}
+                strategy = (
+                    plan.get("strategy")
+                    or meta.get("strategy")
+                    or meta.get("setup")
+                    or decision.get("setup")
+                    or "trend-follow"
+                )
+
                 tg_sig = TgSignal(
                     signal_id=plan.get("signal_id") or out.get("signal_id") or f"{sym.replace('/','')}-{int(time.time())}",
                     symbol=sym.replace("/", ""),
                     timeframe=plan.get("timeframe") or "4H",
                     side=plan.get("side") or side or "long",
-                    strategy=plan.get("strategy") or "GPT-plan",
-                    entries=plan.get("entries") or [],
-                    sl=plan.get("sl") if plan.get("sl") is not None else 0.0,
+                    strategy=strategy,
+                    entries=entries,
+                    sl=slv,
                     tps=plan.get("tps") or [],
                     leverage=plan.get("leverage"),
                     eta=plan.get("eta"),
@@ -179,12 +198,9 @@ def scan_once_for_logs():
                     channel_id=TELEGRAM_CHANNEL_ID,
                     sig=tg_sig,
                     policy=policy,
-                    join_btn_url=JOIN_URL,         # nút Nâng cấp/Gia hạn Plus
-                    # max_free_per_day=2,           # giữ mặc định
-                    # min_plus_between_free=5,      # giữ mặc định
+                    join_btn_url=JOIN_URL,
                 )
 
-                # Nối tracker nếu có
                 if info and _TRACKER and PostRef:
                     post_ref = PostRef(chat_id=info["chat_id"], message_id=info["message_id"])
                     signal_payload = {
@@ -231,7 +247,6 @@ def _scan_loop():
 
 @app.on_event("startup")
 def _on_startup():
-    # Spawn thread quét định kỳ
     t = threading.Thread(target=_scan_loop, daemon=True)
     t.start()
     app.state.scan_thread = t
@@ -263,5 +278,4 @@ def api_scan_once(req: ScanOnceReq):
 
 
 if __name__ == "__main__":
-    # Chạy 1 vòng quét đơn lẻ khi chạy trực tiếp
     scan_once_for_logs()
