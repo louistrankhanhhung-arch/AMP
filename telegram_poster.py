@@ -12,9 +12,8 @@ Yêu cầu:
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 import os
-from pathlib import Path
 import sqlite3
 import datetime as dt
 
@@ -22,16 +21,16 @@ from telebot import TeleBot, types
 
 
 # ======================
-# 1) Kiểu dữ liệu Signal
+# 1) Mô tả tín hiệu
 # ======================
 
 @dataclass
 class Signal:
-    signal_id: str
-    symbol: str                # "BTCUSDT"
-    timeframe: str             # "1H" | "4H" | "1D" ...
-    side: str                  # "long" | "short"
-    strategy: str              # "Trend-Follow", ...
+    signal_id: str            # định danh duy nhất, dùng cho deep-link & cache
+    symbol: str               # "BTCUSDT" (không có '/')
+    timeframe: str            # "1H" | "4H" | "1D" ...
+    side: str                 # "long" | "short"
+    strategy: str             # "trend-follow", ...
     entries: List[float]
     sl: float
     tps: List[float]
@@ -52,63 +51,47 @@ class DailyQuotaPolicy:
     - Mỗi ngày tối đa `max_free_per_day` post FREE (mặc định 2).
     - Chỉ cho FREE khi đã có ít nhất `min_plus_between_free` bài PLUS kể từ lần FREE gần nhất
       (mặc định 5) -> giúp phân tán đều kiểu ~ 2 FREE / ~10 PLUS.
-    - Có thể ép post FREE qua `force_free=True` (bỏ qua điều kiện giãn cách, nhưng vẫn tôn trọng quota ngày
-      trừ khi `ignore_quota=True`).
+    - Có thể ép post FREE qua `force_free=True`.
     """
-    def __init__(self, db_path: str = "policy.sqlite3", key: str = "global"):
-        # Bảo đảm thư mục cha tồn tại (hữu ích khi trỏ vào /mnt/data trên Railway)
-        try:
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
+
+    def __init__(self, db_path: str = "/mnt/data/policy.sqlite3", key: str = "global"):
         self.db_path = db_path
         self.key = key
-        self._ensure_table()
-        self._init_db()  # quan trọng: tạo record mặc định nếu chưa có
+        self._ensure()
 
     def _conn(self):
-        c = sqlite3.connect(self.db_path, check_same_thread=False)
-        return c
+        return sqlite3.connect(self.db_path)
 
-    def _ensure_table(self):
+    def _ensure(self):
         c = self._conn()
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS policy_state (
-            key TEXT PRIMARY KEY,
-            day TEXT,
-            free_count INTEGER,
-            plus_count INTEGER,
-            plus_since_last_free INTEGER,
-            last_post_ts TEXT
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS policy_state("
+            "key TEXT PRIMARY KEY, "
+            "day TEXT, "
+            "free_count INTEGER, "
+            "plus_count INTEGER, "
+            "plus_since_last_free INTEGER, "
+            "last_post_ts TEXT)"
         )
-        """)
-        c.commit(); c.close()
-
-    def _init_db(self):
-        """
-        Khởi tạo bản ghi mặc định cho key nếu chưa có.
-        """
-        c = self._conn()
-        row = c.execute("SELECT key FROM policy_state WHERE key=?", (self.key,)).fetchone()
-        if not row:
+        c.execute("SELECT 1 FROM policy_state WHERE key=?", (self.key,))
+        if not c.fetchone():
             c.execute(
                 "INSERT INTO policy_state(key, day, free_count, plus_count, plus_since_last_free, last_post_ts) "
                 "VALUES(?,?,?,?,?,?)",
                 (self.key, self._today(), 0, 0, 0, dt.datetime.utcnow().isoformat())
             )
-            c.commit()
-        c.close()
+        c.commit(); c.close()
 
     def _today(self) -> str:
-        return dt.date.today().isoformat()
+        return dt.datetime.utcnow().strftime("%Y-%m-%d")
 
-    def _load(self) -> Tuple[str, int, int, int]:
+    def _load(self):
         c = self._conn()
-        row = c.execute(
+        cur = c.execute(
             "SELECT day, free_count, plus_count, plus_since_last_free FROM policy_state WHERE key=?",
             (self.key,)
-        ).fetchone()
-        c.close()
+        )
+        row = cur.fetchone(); c.close()
         if not row:
             return self._today(), 0, 0, 0
         return row[0], int(row[1]), int(row[2]), int(row[3])
@@ -126,39 +109,51 @@ class DailyQuotaPolicy:
         day, free_c, plus_c, plus_gap = self._load()
         today = self._today()
         if day != today:
-            # Reset theo ngày mới
-            self._save(today, 0, 0, 0)
-            return today, 0, 0, 0
+            day, free_c, plus_c, plus_gap = today, 0, 0, 0
+            self._save(day, free_c, plus_c, plus_gap)
         return day, free_c, plus_c, plus_gap
 
     def decide_is_free(
         self,
+        *,
         max_free_per_day: int = 2,
         min_plus_between_free: int = 5,
         force_free: bool = False,
         ignore_quota: bool = False
     ) -> bool:
         """
-        Trả True -> đăng FREE; False -> đăng PLUS (teaser).
+        Trả về True -> bài FREE; False -> bài PLUS.
+        Đồng thời cập nhật bộ đếm trong DB.
         """
         day, free_c, plus_c, plus_gap = self._roll_day_if_needed()
 
+        # Nếu ép FREE
         if force_free:
-            if ignore_quota or free_c < max_free_per_day:
-                self._save(day, free_c + 1, plus_c, 0)  # reset gap sau free
-                return True
-            # Nếu hết quota và không bỏ qua quota: rơi xuống PLUS
-            self._save(day, free_c, plus_c + 1, plus_gap + 1)
-            return False
-
-        # Tự động: chỉ FREE nếu còn quota và đạt khoảng cách PLUS tối thiểu
-        if free_c < max_free_per_day and plus_gap >= min_plus_between_free:
-            self._save(day, free_c + 1, plus_c, 0)
+            free_c += 1
+            plus_gap = 0
+            self._save(day, free_c, plus_c, plus_gap)
             return True
 
-        # Mặc định đăng PLUS
-        self._save(day, free_c, plus_c + 1, plus_gap + 1)
-        return False
+        # Điều kiện FREE theo quota + giãn cách
+        if not ignore_quota:
+            if free_c >= max_free_per_day:
+                # hết suất FREE -> PLUS
+                plus_c += 1
+                plus_gap += 1
+                self._save(day, free_c, plus_c, plus_gap)
+                return False
+            if plus_gap < min_plus_between_free:
+                # chưa đủ bài PLUS xen kẽ -> PLUS
+                plus_c += 1
+                plus_gap += 1
+                self._save(day, free_c, plus_c, plus_gap)
+                return False
+
+        # Cho FREE
+        free_c += 1
+        plus_gap = 0
+        self._save(day, free_c, plus_c, plus_gap)
+        return True
 
 
 # ======================
@@ -166,16 +161,21 @@ class DailyQuotaPolicy:
 # ======================
 
 def _fmt_price(x: float) -> str:
-    # Bỏ phần thập phân thừa cho gọn (ví dụ 4.7000 -> 4.7)
     s = f"{x:.8f}".rstrip('0').rstrip('.')
     return s if s else "0"
+
+def _label_from_tf(tf: str) -> str:
+    tfu = (tf or "").upper()
+    intradays = {"5M", "15M", "30M", "45M", "1H", "2H"}
+    return "INTRADAY" if tfu in intradays else "SWING"
 
 def render_full(sig: Signal) -> str:
     tps = "\n".join(f"<b>TP{i+1}:</b> {_fmt_price(p)}" for i, p in enumerate(sig.tps))
     lev = f"\n<b>Leverage:</b> x{sig.leverage}" if sig.leverage else ""
     eta = f"\n<b>ETA:</b> {sig.eta}" if sig.eta else ""
+    label = _label_from_tf(sig.timeframe)
     return (
-        f"<b>#{sig.symbol}</b> — <b>{sig.side.upper()}</b> {sig.timeframe}\n"
+        f"<b>#{sig.symbol}</b> — <b>{sig.side.upper()}</b> {sig.timeframe} ({label})\n"
         f"<b>Entry:</b> {_fmt_price(sig.entries[0])}\n"
         f"<b>SL:</b> {_fmt_price(sig.sl)}\n"
         f"{tps}{lev}{eta}"
@@ -186,24 +186,24 @@ def render_teaser(sig: Signal) -> str:
     Che số bằng biểu tượng 🔒 và bọc <tg-spoiler> để người dùng Plus mở DM lấy bản full.
     """
     lock = "🔒"
-    tps_lock = lock  # có thể lặp nhiều: lock * min(3, len(sig.tps))
+    tps_lock = lock
+    label = _label_from_tf(sig.timeframe)
     return (
-        f"<b>{sig.symbol} {sig.timeframe}</b>\n"
+        f"<b>{sig.symbol} {sig.timeframe} ({label})</b>\n"
         f"Setup: {sig.strategy}\n"
         f"Entry: <tg-spoiler>{lock}</tg-spoiler> | "
         f"SL: <tg-spoiler>{lock}</tg-spoiler> | "
         f"TP: <tg-spoiler>{tps_lock}</tg-spoiler>"
     )
 
+
+# ======================
+# 4) Deep-link / post
+# ======================
+
 def make_deeplink(bot: TeleBot, sig: Signal) -> str:
-    # Deep-link mở DM để bot xử lý quyền xem full theo membership
     username = bot.get_me().username
     return f"https://t.me/{username}?start=SIG_{sig.signal_id}"
-
-
-# ======================
-# 4) Gửi bài lên channel
-# ======================
 
 def post_signal(
     bot: TeleBot,
@@ -215,14 +215,12 @@ def post_signal(
     min_plus_between_free: int = 5,
     force_free: bool = False,
     ignore_quota: bool = False,
-    join_btn_url: Optional[str] = None  # ví dụ link đăng ký Plus / hướng dẫn
+    join_btn_url: Optional[str] = None  # link landing/FAQ thanh toán
 ) -> Dict[str, Any]:
     """
     - Quyết định FREE/PLUS theo policy hàng ngày.
     - FREE -> gửi full ngay trên channel.
     - PLUS -> gửi teaser + nút deep-link '🔓 Xem đầy đủ'.
-
-    Trả về: dict chứa loại bài và (chat_id, message_id).
     """
     is_free = policy.decide_is_free(
         max_free_per_day=max_free_per_day,
@@ -231,7 +229,6 @@ def post_signal(
         ignore_quota=ignore_quota
     )
 
-    # Inline keyboard
     kb = types.InlineKeyboardMarkup()
 
     if is_free:
@@ -259,49 +256,3 @@ def post_signal(
         "chat_id": msg.chat.id,
         "message_id": msg.message_id
     }
-
-
-# ======================
-# 5) Ví dụ sử dụng (tham khảo)
-# ======================
-if __name__ == "__main__":
-    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    CHANNEL_ID = int(os.getenv("TELEGRAM_CHANNEL_ID", "0"))  # ví dụ: -1001234567890
-    JOIN_URL = os.getenv("JOIN_URL", None)  # link trang nâng cấp Plus (tuỳ chọn)
-
-    if not BOT_TOKEN or CHANNEL_ID == 0:
-        raise SystemExit("Thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHANNEL_ID")
-
-    bot = TeleBot(BOT_TOKEN, parse_mode=None)  # parse_mode set ở send_message
-
-    # Policy (mặc định 2 FREE/ngày) — ưu tiên Volume /mnt/data nếu có
-    default_db_path = "/mnt/data/policy.sqlite3"
-    db_path = os.getenv("POLICY_DB", default_db_path)
-    policy = DailyQuotaPolicy(db_path=db_path, key=os.getenv("POLICY_KEY", "global"))
-
-    # Signal mẫu
-    demo = Signal(
-        signal_id="BTC-1D-20250812-001",
-        symbol="BTCUSDT",
-        timeframe="1D",
-        side="long",
-        strategy="Trend-Follow (Pullback hợp lệ)",
-        entries=[67600.0, 66800.0],
-        sl=65200.0,
-        tps=[69000.0, 70500.0, 72000.0],
-        leverage=5,
-        eta="1–3d",
-        chart_url=None
-    )
-
-    info = post_signal(
-        bot=bot,
-        channel_id=CHANNEL_ID,
-        sig=demo,
-        policy=policy,
-        max_free_per_day=2,
-        min_plus_between_free=5,
-        force_free=False,
-        join_btn_url=JOIN_URL
-    )
-    print(info)
