@@ -65,11 +65,20 @@ RR_LOCK = threading.Lock()
 # ====== App ======
 app = FastAPI()
 
-_BOT = None
-_NOTIFIER = None
-_TRACKER = None
+_BOT: Any | None = None
+_NOTIFIER: Any | None = None
+_TRACKER: Any | None = None
 
-if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID and TgSignal and DailyQuotaPolicy and post_signal:
+if (
+    TELEGRAM_BOT_TOKEN
+    and TELEGRAM_CHANNEL_ID
+    and TgSignal
+    and DailyQuotaPolicy
+    and post_signal
+    and TelegramNotifier
+    and PostRef
+    and SignalTracker
+):
     try:
         _NOTIFIER = TelegramNotifier(token=TELEGRAM_BOT_TOKEN, default_chat_id=TELEGRAM_CHANNEL_ID)  # type: ignore
         _BOT = _NOTIFIER.bot  # type: ignore
@@ -238,8 +247,7 @@ def scan_once_for_logs():
             else:
                 # ENTER hoặc N/A: in signal nếu có, ưu tiên 1 dòng súc tích nếu thiếu `tele`
                 if tele:
-                    print("[signal]
-" + tele)
+                    print("[signal]\n" + tele)
                 else:
                     entries = plan.get("entries") or []
                     slv = plan.get("sl")
@@ -259,8 +267,7 @@ def scan_once_for_logs():
                     print("[signal] " + " | ".join(fields))
 
             if out.get("analysis_text"):
-                print("[analysis]
-" + out["analysis_text"])  # có thể dài
+                print("[analysis]\n" + out["analysis_text"])  # có thể dài
             sent += 1
 
             # >>> Chỉ post khi action == ENTER <<<
