@@ -1,3 +1,6 @@
+# main.py
+# Quét – tạo – post tín hiệu lên Telegram; thêm DM flow membership & cache full signal
+
 import os, threading, time, logging
 import json
 import traceback
@@ -8,13 +11,13 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 # ====== modules trong repo ======
-from kucoin_api import fetch_batch
-from indicators import enrich_indicators, enrich_more   # <— thêm enrich_more
+from kucoin_api import fetch_batch  # (có thể không dùng)
+from indicators import enrich_indicators, enrich_more
 from structure_engine import build_struct_json
 from universe import resolve_symbols
 from gpt_signal_builder import make_telegram_signal
 
-# (tuỳ chọn đăng Telegram & nối dây tracker — giữ nguyên nếu đã dùng)
+# (tuỳ chọn đăng Telegram & nối dây tracker)
 try:
     from telegram_poster import Signal as TgSignal, DailyQuotaPolicy, post_signal
     from notifier import TelegramNotifier, PostRef
@@ -25,20 +28,26 @@ except Exception:
 # ---- Logging ----
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# ====== FastAPI app (chỉ tạo 1 lần) ======
+# ====== FastAPI app ======
 app = FastAPI()
 
 # ====== Cấu hình ======
 SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "15"))
-SCAN_TFS = os.getenv("SCAN_TFS", "1H,4H,1D")  # quét 1H/4H/1D
+SCAN_TFS = os.getenv("SCAN_TFS", "1H,4H,1D")
 MAX_GPT = int(os.getenv("MAX_GPT", "10"))
 EXCHANGE = os.getenv("EXCHANGE", "KUCOIN")
 
-# Telegram (nếu muốn post)
+# Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL_ID = int(os.getenv("TELEGRAM_CHANNEL_ID", "0") or 0)
 POLICY_DB = os.getenv("POLICY_DB", "/mnt/data/policy.sqlite3")
 POLICY_KEY = os.getenv("POLICY_KEY", "global")
+
+# Membership / DM
+JOIN_URL = os.getenv("JOIN_URL", None)  # link nâng cấp/gia hạn Plus
+ADMIN_USER_IDS = set(
+    int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()
+)
 
 _BOT = None
 _NOTIFIER = None
@@ -56,22 +65,25 @@ if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID and TgSignal and DailyQuotaPolicy 
         _BOT = None
         _TRACKER = None
 
+
 @app.get("/health")
 def health():
     return {"ok": True, "ts": time.time()}
 
+
 # ====== Utils ======
 def _chunk(lst: List[Any], n: int) -> Iterable[List[Any]]:
     for i in range(0, len(lst), n):
-        yield lst[i:i + n]
+        yield lst[i : i + n]
 
-# --- thay toàn bộ hàm _build_structs_for trong main.py bằng đoạn dưới ---
-from kucoin_api import fetch_ohlcv  # đã được import ở đầu file
+
+# --- Build structs cho 1H/4H/1D ---
+from kucoin_api import fetch_ohlcv  # dùng riêng cho 1 symbol/TF
+
 
 def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
     """
-    Lấy OHLCV cho mỗi symbol ở 3 khung 1H/4H/1D (không dùng fetch_batch của kucoin_api,
-    vì hàm đó nhận 1 symbol + list timeframe).
+    Lấy OHLCV cho mỗi symbol ở 3 khung 1H/4H/1D.
     Bổ sung enrich_more(...) để có thêm candle anatomy, vol_z20, soft MA...
     """
     out: List[Dict[str, Any]] = []
@@ -82,7 +94,7 @@ def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
             df4h_raw = fetch_ohlcv(sym, timeframe="4H", limit=300)
             df1d_raw = fetch_ohlcv(sym, timeframe="1D", limit=300)
 
-            # enrich đầy đủ (enrich_indicators -> enrich_more) cho mọi TF
+            # enrich cho mọi TF
             df1h = enrich_more(enrich_indicators(df1h_raw)) if df1h_raw is not None else None
             df4h = enrich_more(enrich_indicators(df4h_raw)) if df4h_raw is not None else None
             df1d = enrich_more(enrich_indicators(df1d_raw)) if df1d_raw is not None else None
@@ -104,9 +116,11 @@ def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
             traceback.print_exc()
     return out
 
-# ====== Round-Robin bền (Cách B) ======
+
+# ====== Round-Robin bền ======
 RR_PTR_FILE = os.getenv("RR_PTR_FILE", "/mnt/data/rr_ptr.json")
 RR_LOCK = threading.Lock()
+
 
 def _load_rr_ptr(n_symbols: int) -> int:
     """Đọc con trỏ round-robin từ file; trả 0 nếu chưa có."""
@@ -122,6 +136,7 @@ def _load_rr_ptr(n_symbols: int) -> int:
         logging.warning(f"[rr] load ptr error: {e}")
     return 0
 
+
 def _save_rr_ptr(ptr: int) -> None:
     """Ghi con trỏ round-robin ra file (best-effort)."""
     try:
@@ -131,6 +146,7 @@ def _save_rr_ptr(ptr: int) -> None:
     except Exception as e:
         logging.warning(f"[rr] save ptr error: {e}")
 
+
 def _pick_round_robin(symbols: List[str], k: int) -> List[str]:
     """Chọn k mã theo con trỏ lưu file; lần sau tiếp tục từ vị trí mới (bền qua restart)."""
     if not symbols or k <= 0:
@@ -139,12 +155,40 @@ def _pick_round_robin(symbols: List[str], k: int) -> List[str]:
         n = len(symbols)
         ptr = _load_rr_ptr(n)
         order = symbols[ptr:] + symbols[:ptr]
-        picked = order[:min(k, n)]
+        picked = order[: min(k, n)]
         new_ptr = (ptr + len(picked)) % n
         _save_rr_ptr(new_ptr)
     return picked
 
-# ====== Scan ======
+
+# ====== Scan & Post ======
+def _cache_signal_payload(tg_sig: "TgSignal"):
+    """
+    Lưu payload đầy đủ vào /mnt/data/signals_index.json để DM có thể mở khóa theo signal_id.
+    """
+    try:
+        idx_path = "/mnt/data/signals_index.json"
+        idx: Dict[str, Any] = {}
+        if os.path.exists(idx_path):
+            with open(idx_path, "r", encoding="utf-8") as f:
+                idx = json.load(f) or {}
+        idx[tg_sig.signal_id] = {
+            "symbol": tg_sig.symbol,
+            "side": tg_sig.side,
+            "entries": tg_sig.entries or [],
+            "sl": tg_sig.sl,
+            "tps": tg_sig.tps or [],
+            "leverage": tg_sig.leverage,
+            "timeframe": tg_sig.timeframe,
+            "eta": tg_sig.eta,
+        }
+        os.makedirs(os.path.dirname(idx_path), exist_ok=True)
+        with open(idx_path, "w", encoding="utf-8") as f:
+            json.dump(idx, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.warning(f"[cache] save signal error: {e}")
+
+
 def scan_once_for_logs():
     start_ts = datetime.utcnow().isoformat() + "Z"
     syms = resolve_symbols("")
@@ -191,24 +235,40 @@ def scan_once_for_logs():
 
             meta = out.get("meta", {})
             rr = meta.get("rr", {})
-            print(f"[meta] {sym} conf={meta.get('confidence')} rr_min={rr.get('rr_min')} rr_max={rr.get('rr_max')} eta={meta.get('eta')}")
+            print(
+                f"[meta] {sym} conf={meta.get('confidence')} rr_min={rr.get('rr_min')} "
+                f"rr_max={rr.get('rr_max')} eta={meta.get('eta')}"
+            )
 
             if tele and _BOT and _NOTIFIER and TgSignal and DailyQuotaPolicy and post_signal:
                 plan = out.get("plan") or out.get("signal") or {}
                 tg_sig = TgSignal(
-                    signal_id = plan.get("signal_id") or out.get("signal_id") or f"{sym.replace('/','')}-{int(time.time())}",
-                    symbol    = sym.replace("/", ""),
-                    timeframe = plan.get("timeframe") or "4H",
-                    side      = plan.get("side") or side or "long",
-                    strategy  = plan.get("strategy") or "GPT-plan",
-                    entries   = plan.get("entries") or [],
-                    sl        = plan.get("sl") if plan.get("sl") is not None else 0.0,
-                    tps       = plan.get("tps") or [],
-                    leverage  = plan.get("leverage"),
-                    eta       = plan.get("eta"),
+                    signal_id=plan.get("signal_id") or out.get("signal_id") or f"{sym.replace('/','')}-{int(time.time())}",
+                    symbol=sym.replace("/", ""),
+                    timeframe=plan.get("timeframe") or "4H",
+                    side=plan.get("side") or side or "long",
+                    strategy=plan.get("strategy") or "GPT-plan",
+                    entries=plan.get("entries") or [],
+                    sl=plan.get("sl") if plan.get("sl") is not None else 0.0,
+                    tps=plan.get("tps") or [],
+                    leverage=plan.get("leverage"),
+                    eta=plan.get("eta"),
                 )
                 policy = DailyQuotaPolicy(db_path=POLICY_DB, key=POLICY_KEY)
-                info = post_signal(bot=_BOT, channel_id=TELEGRAM_CHANNEL_ID, sig=tg_sig, policy=policy)
+
+                # >>> THAY ĐỔI: truyền join_btn_url để hiện nút nâng cấp/gia hạn Plus <<<
+                info = post_signal(
+                    bot=_BOT,
+                    channel_id=TELEGRAM_CHANNEL_ID,
+                    sig=tg_sig,
+                    policy=policy,
+                    join_btn_url=JOIN_URL,
+                )
+
+                # Lưu cache full nội dung theo signal_id để DM có thể mở khóa
+                _cache_signal_payload(tg_sig)
+
+                # Nối tracker nếu có
                 if info and _TRACKER and PostRef:
                     post_ref = PostRef(chat_id=info["chat_id"], message_id=info["message_id"])
                     signal_payload = {
@@ -239,6 +299,7 @@ def scan_once_for_logs():
     except Exception as e:
         print("[scan] write log error:", e)
 
+
 # ====== Scheduler background ======
 def _scan_loop():
     logging.info(f"[scheduler] start: interval={SCAN_INTERVAL_MIN} min")
@@ -250,17 +311,25 @@ def _scan_loop():
             logging.exception(f"[scan] error: {e}")
         time.sleep(SCAN_INTERVAL_MIN * 60)  # phút → giây
 
+
 @app.on_event("startup")
 def _on_startup():
+    # Spawn thread quét định kỳ
     t = threading.Thread(target=_scan_loop, daemon=True)
     t.start()
     app.state.scan_thread = t
     logging.info("[scheduler] thread spawned")
 
+    # Đăng ký DM handlers — chỉ khi bot đã sẵn sàng
+    if _BOT:
+        _register_dm_handlers(_BOT)
+
+
 # ====== API ======
 class ScanOnceReq(BaseModel):
     symbols: List[str] | None = None
     max_gpt: int | None = None
+
 
 @app.post("/scan_once")
 def api_scan_once(req: ScanOnceReq):
@@ -279,5 +348,137 @@ def api_scan_once(req: ScanOnceReq):
     scan_once_for_logs()
     return {"ok": True}
 
+
+# ====== DM FLOW: deep-link SIG_, /plus, /status, /redeem, /grant_plus ======
+def _register_dm_handlers(bot):
+    from telebot import types  # import nội bộ để tránh lỗi khi không bật Telegram
+    from membership import has_plus, activate_plus, get_expiry, remaining_days
+
+    def _load_signal_payload(signal_id: str):
+        try:
+            p = "/mnt/data/signals_index.json"
+            if not os.path.exists(p):
+                return None
+            with open(p, "r", encoding="utf-8") as f:
+                idx = json.load(f) or {}
+            return idx.get(signal_id)
+        except Exception:
+            return None
+
+    def _render_full_from_payload(p: dict) -> str:
+        def _fmt(v):
+            if isinstance(v, (int, float)):
+                s = f"{float(v):.8f}".rstrip("0").rstrip(".")
+                return s or "0"
+            return "-" if v is None else str(v)
+
+        tps = "\n".join([f"<b>TP{i+1}:</b> {_fmt(v)}" for i, v in enumerate(p.get("tps") or [])])
+        lev = f"\n<b>Leverage:</b> x{p['leverage']}" if p.get("leverage") else ""
+        eta = f"\n<b>ETA:</b> {p['eta']}" if p.get("eta") else ""
+        return (
+            f"<b>#{p['symbol']}</b> — <b>{str(p.get('side','long')).upper()}</b> {p.get('timeframe','')}\n"
+            f"<b>Entry:</b> {', '.join(_fmt(e) for e in (p.get('entries') or []))}\n"
+            f"<b>SL:</b> {_fmt(p.get('sl'))}\n"
+            f"{tps}{lev}{eta}"
+        )
+
+    @bot.message_handler(commands=["start"])
+    def on_start(msg):
+        # Deep-link: /start SIG_<id>
+        parts = (msg.text or "").split(maxsplit=1)
+        if len(parts) == 2 and parts[1].startswith("SIG_"):
+            signal_id = parts[1][4:]
+            if has_plus(msg.from_user.id):
+                payload = _load_signal_payload(signal_id)
+                if payload:
+                    bot.send_message(
+                        msg.chat.id,
+                        _render_full_from_payload(payload),
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                else:
+                    bot.send_message(msg.chat.id, "Không tìm thấy nội dung đầy đủ cho signal này. Thử lại sau.")
+            else:
+                kb = types.InlineKeyboardMarkup()
+                if JOIN_URL:
+                    kb.add(types.InlineKeyboardButton("✨ Nâng cấp/Gia hạn Plus", url=JOIN_URL))
+                bot.send_message(
+                    msg.chat.id,
+                    "Nội dung này dành cho thành viên <b>Plus</b>. "
+                    "Bạn chưa có quyền xem. Nâng cấp để mở khóa toàn bộ Entry/SL/TP.",
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+        else:
+            bot.send_message(msg.chat.id, "Xin chào! Gõ /plus để xem gói, /status để kiểm tra hạn.")
+
+    @bot.message_handler(commands=["plus"])
+    def plus_info(msg):
+        text = (
+            "<b>Plus Membership</b>\n"
+            "• Xem full tất cả tín hiệu (Entry/SL/TP)\n"
+            "• Không bị che số, có ETA & ghi chú\n"
+            "• Hỗ trợ ưu tiên\n\n"
+            "Gõ /status để xem hạn."
+        )
+        if JOIN_URL:
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("✨ Nâng cấp/Gia hạn Plus", url=JOIN_URL))
+            bot.send_message(msg.chat.id, text, parse_mode="HTML", reply_markup=kb)
+        else:
+            bot.send_message(msg.chat.id, text, parse_mode="HTML")
+
+    @bot.message_handler(commands=["status"])
+    def plus_status(msg):
+        exp = get_expiry(msg.from_user.id)
+        if exp:
+            days = remaining_days(msg.from_user.id)
+            bot.send_message(
+                msg.chat.id,
+                f"Trạng thái: <b>Plus</b>\nHết hạn: {exp.isoformat()} UTC (~{days} ngày còn lại).",
+                parse_mode="HTML",
+            )
+        else:
+            bot.send_message(msg.chat.id, "Bạn chưa có Plus. Gõ /plus để xem quyền lợi.", parse_mode="HTML")
+
+    @bot.message_handler(commands=["redeem"])
+    def redeem_code(msg):
+        # Dùng ENV PLUS_VOUCHERS='{"CODE30":30,"TRIAL7":7}'
+        try:
+            parts = (msg.text or "").split(maxsplit=1)
+            if len(parts) < 2:
+                bot.send_message(msg.chat.id, "Cú pháp: /redeem MÃ_VOUCHER")
+                return
+            codes = json.loads(os.getenv("PLUS_VOUCHERS", "{}") or "{}")
+            code = parts[1].strip().upper()
+            days = int(codes.get(code, 0))
+            if days <= 0:
+                bot.send_message(msg.chat.id, "Mã không hợp lệ.")
+                return
+            exp = activate_plus(msg.from_user.id, days=days)
+            bot.send_message(msg.chat.id, f"Đã kích hoạt Plus thêm {days} ngày. Hết hạn: {exp.isoformat()} UTC.")
+        except Exception as e:
+            bot.send_message(msg.chat.id, f"Lỗi redeem: {e}")
+
+    @bot.message_handler(commands=["grant_plus"])
+    def grant_plus(msg):
+        # Admin cấp tay: /grant_plus <user_id> <days>
+        try:
+            if msg.from_user.id not in ADMIN_USER_IDS:
+                return
+            parts = (msg.text or "").split()
+            if len(parts) != 3:
+                bot.send_message(msg.chat.id, "Cú pháp: /grant_plus <user_id> <days>")
+                return
+            uid = int(parts[1])
+            days = int(parts[2])
+            exp = activate_plus(uid, days=days)
+            bot.send_message(msg.chat.id, f"OK. User {uid} Plus đến {exp.isoformat()} UTC.")
+        except Exception as e:
+            bot.send_message(msg.chat.id, f"Lỗi grant_plus: {e}")
+
+
 if __name__ == "__main__":
+    # Chạy 1 vòng quét đơn lẻ khi chạy trực tiếp
     scan_once_for_logs()
