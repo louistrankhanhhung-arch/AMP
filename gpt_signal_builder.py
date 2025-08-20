@@ -172,18 +172,12 @@ def _analysis_lines(symbol: str, decision: Dict[str, Any], tag: str) -> List[str
 def _merge_analysis(symbol: str, p1: Optional[Dict[str, Any]], p2: Optional[Dict[str, Any]]) -> str:
     blocks: List[str] = []
     if p1:
-        blocks.append("
-".join(_analysis_lines(symbol, p1, "INTRADAY")))
+        blocks.append("\n".join(_analysis_lines(symbol, p1, "INTRADAY")))
     if p2:
-        blocks.append("
-".join(_analysis_lines(symbol, p2, "SWING")))
+        blocks.append("\n".join(_analysis_lines(symbol, p2, "SWING")))
     if not blocks:
         return f"[ĐÁNH GIÁ] {symbol} | N/A"
-    return "
-
-".join(blocks)
-
-# ====== Prompt xây dựng ======
+    return "\n\n".join(blocks)
 def build_messages_classify(
     struct_4h: Dict[str, Any],
     struct_1d: Dict[str, Any],
