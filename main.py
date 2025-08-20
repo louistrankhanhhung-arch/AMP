@@ -138,9 +138,9 @@ def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
             df4h = enrich_more(enrich_indicators(df4h_raw)) if df4h_raw is not None else None
             df1d = enrich_more(enrich_indicators(df1d_raw)) if df1d_raw is not None else None
 
-            if not (df1h is not None and df4h is not None and df1d is not None):
-                logging.info(f"[build] missing TF for {sym}")
-                continue
+            if any(d is None or getattr(d, "empty", False) for d in (df1h, df4h, df1d)):
+            logging.info(f"[build] missing TF for {sym}")
+            continue
 
             # Ở đây make_telegram_signal kỳ vọng input dạng struct/df đã enrich
             out.append({
@@ -198,8 +198,9 @@ def scan_once_for_logs():
             s1h = next((x["1H"] for x in structs if x["symbol"] == sym), None)
             s4h = next((x["4H"] for x in structs if x["symbol"] == sym), None)
             s1d = next((x["1D"] for x in structs if x["symbol"] == sym), None)
-            if not (s1h and s4h and s1d):
-                print(f"[scan] missing structs: {sym} (need 1H/4H/1D)")
+            missing_tfs = [tf for tf, df in (("1H", s1h), ("4H", s4h), ("1D", s1d)) if (df is None or (hasattr(df, "empty") and df.empty))]
+            if missing_tfs:
+                print(f"[scan] missing structs: {sym} (missing {','.join(missing_tfs)})")
                 continue
 
             out = _call_gpt_with_backoff(s4h, s1d, s1h)
