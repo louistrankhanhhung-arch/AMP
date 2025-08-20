@@ -1,8 +1,8 @@
 # bot_handlers.py
 from __future__ import annotations
 
-import os, re, logging
-from datetime import datetime
+import os, re, logging, random, string
+from datetime import datetime, timezone
 from typing import Set
 
 from telebot import TeleBot, types
@@ -33,26 +33,35 @@ def _admin_ids() -> Set[int]:
 def _is_admin(user_id: int) -> bool:
     return user_id in _admin_ids()
 
-def _plus_link(bot: TeleBot) -> str:
-    # Ưu tiên trang thanh toán riêng nếu có
-    join = os.getenv("JOIN_URL")
-    if join:
-        return join
-    # Mặc định deeplink về DM để hiển thị Paywall
-    uname = bot.get_me().username
-    return f"https://t.me/{uname}?start=UPGRADE}"
+def _gen_order_code(uid: int) -> str:
+    # Ví dụ: ORD-YYMMDD-HHMM-<2 ký tự ngẫu nhiên>
+    ts = datetime.now(timezone.utc).strftime("%y%m%d-%H%M")
+    rand = ''.join(random.choices(string.ascii_uppercase + string.digits, k=2))
+    return f"ORD-{ts}-{rand}"
 
-def _paywall_text() -> str:
-    txt = os.getenv("PAYWALL_TEXT")
-    if txt:
-        return txt
-    # Mặc định: hướng dẫn chuyển khoản ngắn gọn
+def _render_paywall_html(user_id: int, order_code: str) -> str:
+    # Paywall động kèm thông tin ngân hàng + nội dung CK: <mã order> <user_id>
     return (
-        "✨ <b>Nâng cấp/gia hạn gói Plus</b>\n"
-        "• Chuyển khoản theo hướng dẫn tại trang Paywall.\n"
-        "• Sau khi chuyển xong, bấm nút <b>“Đã chuyển tiền”</b> để báo admin.\n"
-        "• Admin sẽ kích hoạt trong thời gian sớm nhất.\n"
+        "✨ <b>Nâng cấp / Gia hạn gói Plus</b>\n\n"
+        "<b>1) Chuyển khoản ngân hàng</b>\n"
+        "• <b>Ngân hàng:</b> Ngân hàng Quân đội (MBBank)\n"
+        "• <b>Số tài khoản:</b> 0378285345\n"
+        "• <b>Chủ tài khoản:</b> Trần Khánh Hưng\n\n"
+        "<b>2) Nội dung chuyển khoản</b>\n"
+        f"<code>{order_code} {user_id}</code>\n"
+        "Ví dụ: <code>ORD-250820-AB12 123456789</code>\n\n"
+        "<b>3) Xác nhận</b>\n"
+        "• Sau khi chuyển khoản, bấm nút <b>“✅ Đã chuyển tiền”</b> bên dưới để báo admin.\n"
+        "• Admin sẽ kích hoạt trong thời gian sớm nhất.\n\n"
+        "<i>Lưu ý:</i>\n"
+        "• Ghi đúng nội dung chuyển khoản để hệ thống so khớp nhanh.\n"
+        "• Nếu sai nội dung, có thể cần bạn gửi ảnh biên lai khi admin yêu cầu.\n"
     )
+
+def _plus_link(bot: TeleBot) -> str:
+    # DM-only: luôn trỏ về DM với deeplink UPGRADE (không dùng landing page)
+    uname = bot.get_me().username
+    return f"https://t.me/{uname}?start=UPGRADE"
 
 def _format_status(uid: int) -> str:
     days = remaining_days(uid)
@@ -78,13 +87,18 @@ def register_handlers(bot: TeleBot):
         if len(parts) > 1:
             token = parts[1].strip()
 
-        # 1) Deeplink UPGRADE -> gửi Paywall + nút "Đã chuyển tiền"
+        # 1) Deeplink UPGRADE -> tạo mã order + gửi Paywall + nút "Đã chuyển tiền"
         if token == "UPGRADE":
+            order_code = _gen_order_code(m.from_user.id)
             kb = types.InlineKeyboardMarkup()
-            kb.add(types.InlineKeyboardButton("✅ Đã chuyển tiền", callback_data=f"PAID_CONFIRMED:{m.from_user.id}"))
+            # Pass cả user_id & order_code cho callback
+            kb.add(types.InlineKeyboardButton(
+                "✅ Đã chuyển tiền",
+                callback_data=f"PAID_CONFIRMED:{m.from_user.id}:{order_code}"
+            ))
             bot.send_message(
                 m.chat.id,
-                _paywall_text(),
+                _render_paywall_html(m.from_user.id, order_code),
                 parse_mode='HTML',
                 reply_markup=kb,
                 disable_web_page_preview=True
@@ -146,7 +160,7 @@ def register_handlers(bot: TeleBot):
     def on_status(m):
         bot.send_message(m.chat.id, _format_status(m.from_user.id), parse_mode='HTML')
 
-    # /plus_link — gửi link nâng cấp/gia hạn
+    # /plus_link — gửi link nâng cấp/gia hạn (DM)
     @bot.message_handler(commands=['plus_link'])
     def on_plus_link(m):
         link = _plus_link(bot)
@@ -187,17 +201,20 @@ def register_handlers(bot: TeleBot):
     # Callback: “Đã chuyển tiền”
     @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("PAID_CONFIRMED"))
     def on_paid_confirmed(call):
+        # Hỗ trợ 2 hoặc 3 phần: PAID_CONFIRMED:<uid>[:<order_code>]
         try:
-            parts = call.data.split(":", 1)
+            parts = call.data.split(":")
             paid_uid = int(parts[1]) if len(parts) > 1 else call.from_user.id
+            paid_order = parts[2] if len(parts) > 2 else "N/A"
         except Exception:
-            paid_uid = call.from_user.id
+            paid_uid, paid_order = call.from_user.id, "N/A"
 
         bot.answer_callback_query(call.id, "Cảm ơn! Admin sẽ kích hoạt sớm.")
         # Báo cho admin
         text = (
             "💳 <b>Yêu cầu kích hoạt Plus</b>\n"
             f"• user_id: <code>{paid_uid}</code>\n"
+            f"• order_code: <code>{paid_order}</code>\n"
             "• Lệnh gợi ý: <code>/plus_add {uid} 30</code>\n".format(uid=paid_uid)
         )
         for aid in _admin_ids():
