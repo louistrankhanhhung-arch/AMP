@@ -225,28 +225,79 @@ def scan_once_for_logs():
                 continue
 
             out = _call_gpt_with_backoff(s4h, s1d, s1h)
-            time.sleep(RATE_SLEEP_SECS)  # spacing hạ RPM
+time.sleep(RATE_SLEEP_SECS)  # spacing hạ RPM
 
-            tele = out.get("telegram_text")
-            decision = out.get("decision") or {}
-            action = str(decision.get("action") or "").upper()
-            side = str(decision.get("side") or "none")
-            conf = decision.get("confidence")
+tele = out.get("telegram_text")
 
-            # ==== Logging theo yêu cầu ====
-            plan = out.get("plan") or out.get("signal") or {}
-            meta = out.get("meta") or {}
-            trigger = (
-                decision.get("trigger")
-                or plan.get("trigger")
-                or meta.get("trigger_hint")
-                or meta.get("trigger")
-            )
-            reason = (
-                decision.get("reason")
-                or plan.get("reason")
-                or meta.get("reason")
-            )
+# Lấy các nhánh có thể có trong output
+plan   = out.get("plan") or out.get("signal") or {}
+if not plan and isinstance(out.get("enter_plans"), list) and out["enter_plans"]:
+    plan = out["enter_plans"][0] or {}
+meta   = out.get("meta") or {}
+plans  = out.get("plans") or {}
+
+# --- Fallback cho decision/action/side/conf ---
+decision = out.get("decision") or {}
+
+if not decision:
+    if plan:  # có plan => chắc chắn ENTER
+        decision = {
+            "action": "ENTER",
+            "side": plan.get("side") or "long",
+            "confidence": (
+                plan.get("confidence")
+                or meta.get("intraday_conf")
+                or meta.get("swing_conf")
+            ),
+            "trigger": plan.get("trigger"),
+            "reason": plan.get("reason"),
+        }
+    else:
+        intr = str(meta.get("intraday_decision") or "").upper()
+        swg  = str(meta.get("swing_decision") or "").upper()
+        if "WAIT" in {intr, swg}:
+            guessed_action = "WAIT"
+        elif "AVOID" in {intr, swg}:
+            guessed_action = "AVOID"
+        else:
+            guessed_action = intr or swg or "WAIT"
+
+        # đoán side/conf từ plans (ưu tiên intraday rồi swing)
+        intr_plan = plans.get("intraday_1h") or plans.get("intraday") or {}
+        swg_plan  = plans.get("swing_4h")    or plans.get("swing")    or {}
+
+        side_guess = intr_plan.get("side") or swg_plan.get("side") or "none"
+        conf_guess = (
+            intr_plan.get("confidence")
+            or swg_plan.get("confidence")
+            or meta.get("intraday_conf")
+            or meta.get("swing_conf")
+        )
+
+        decision = {
+            "action": guessed_action,
+            "side": side_guess,
+            "confidence": conf_guess,
+        }
+
+        # Chuẩn hoá các biến dùng phía sau
+        action = str(decision.get("action") or "").upper()
+        side   = str(decision.get("side") or "none")
+        conf   = decision.get("confidence")
+        
+        # ==== Logging theo yêu cầu ====
+        trigger = (
+            decision.get("trigger")
+            or plan.get("trigger")
+            or meta.get("trigger_hint")
+            or meta.get("trigger")
+        )
+        reason = (
+            decision.get("reason")
+            or plan.get("reason")
+            or meta.get("reason")
+        )
+
 
             if action == "WAIT":
                 print(f"[WAIT] {sym} | side={side} | conf={conf} | trigger={trigger or '-'}")
