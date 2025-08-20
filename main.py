@@ -64,6 +64,13 @@ RR_PTR_FILE = os.getenv("RR_PTR_FILE", "/mnt/data/rr_ptr.json")
 RR_LOCK = threading.Lock()
 
 # ====== App ======
+_HANDLERS_WIRED = False
+def wire_handlers_once(bot):
+    global _HANDLERS_WIRED
+    if bot and not _HANDLERS_WIRED:
+        register_handlers(bot)
+        _HANDLERS_WIRED = True
+        
 app = FastAPI()
 
 _BOT: Any | None = None
@@ -83,12 +90,12 @@ if (
     try:
         _NOTIFIER = TelegramNotifier(token=TELEGRAM_BOT_TOKEN, default_chat_id=TELEGRAM_CHANNEL_ID)  # type: ignore
         _BOT = _NOTIFIER.bot  # type: ignore
+        wire_handlers_once(_BOT)
         _TRACKER = SignalTracker(_NOTIFIER)  # type: ignore
         logging.info("[telegram] bot & tracker ready")
     except Exception as e:
         logging.warning(f"[telegram] init failed: {e}")
-
-
+        
 # ====== Utils ======
 def _chunk(lst: List[Any], n: int) -> Iterable[List[Any]]:
     for i in range(0, len(lst), n):
@@ -397,9 +404,6 @@ def api_scan_once(req: ScanOnceReq):
         return {"ok": True, "count": len(req.symbols)}
     scan_once_for_logs()
     return {"ok": True}
-
-if _BOT:
-    register_handlers(_BOT)
 
 if __name__ == "__main__":
     scan_once_for_logs()
