@@ -4,10 +4,6 @@
 Đăng signal lên Telegram channel theo 2 chế độ:
 - FREE (unmasked) — quota theo ngày
 - PLUS (teaser, che số bằng 🔒 + <tg-spoiler>), kèm nút deep-link mở DM bot
-
-Yêu cầu:
-- pyTelegramBotAPI (TeleBot)
-- Bot đã là admin của channel
 """
 
 from __future__ import annotations
@@ -25,16 +21,16 @@ from telebot import TeleBot, types
 
 @dataclass
 class Signal:
-    signal_id: str            # định danh duy nhất, dùng cho deep-link & cache
-    symbol: str               # "BTCUSDT" (không có '/')
-    timeframe: str            # "1H" | "4H" | "1D" ...
-    side: str                 # "long" | "short"
-    strategy: str             # "trend-follow", ...
+    signal_id: str
+    symbol: str             # "BTCUSDT" (không có '/')
+    timeframe: str          # "1H" | "4H" | "1D" ...
+    side: str               # "long" | "short" | "none"
+    strategy: str           # "trend-follow", "reclaim", ...
     entries: List[float]
     sl: float
     tps: List[float]
     leverage: Optional[int] = None
-    eta: Optional[str] = None  # "1-3d" ...
+    eta: Optional[str] = None
     chart_url: Optional[str] = None
 
 
@@ -44,12 +40,8 @@ class Signal:
 
 class DailyQuotaPolicy:
     """
-    Lưu quota trong SQLite để bền vững qua restart.
-
-    Quy tắc:
     - Mỗi ngày tối đa `max_free_per_day` post FREE (mặc định 2).
-    - Chỉ cho FREE khi đã có ít nhất `min_plus_between_free` bài PLUS kể từ lần FREE gần nhất
-      (mặc định 5).
+    - Chỉ cho FREE khi đã có ít nhất `min_plus_between_free` bài PLUS kể từ lần FREE gần nhất (mặc định 5).
     - Có thể ép post FREE qua `force_free=True`.
     """
 
@@ -133,20 +125,14 @@ class DailyQuotaPolicy:
         force_free: bool = False,
         ignore_quota: bool = False
     ) -> bool:
-        """
-        Trả về True -> bài FREE; False -> bài PLUS.
-        Đồng thời cập nhật bộ đếm trong DB.
-        """
         day, free_c, plus_c, plus_gap = self._roll_day_if_needed()
 
-        # Nếu ép FREE
         if force_free:
             free_c += 1
             plus_gap = 0
             self._save(day, free_c, plus_c, plus_gap)
             return True
 
-        # Điều kiện FREE theo quota + giãn cách
         if not ignore_quota:
             if free_c >= max_free_per_day:
                 plus_c += 1
@@ -159,7 +145,6 @@ class DailyQuotaPolicy:
                 self._save(day, free_c, plus_c, plus_gap)
                 return False
 
-        # Cho FREE
         free_c += 1
         plus_gap = 0
         self._save(day, free_c, plus_c, plus_gap)
@@ -193,14 +178,12 @@ def render_full(sig: Signal) -> str:
     )
 
 def render_teaser(sig: Signal) -> str:
-    """
-    Che số bằng biểu tượng 🔒 và bọc <tg-spoiler> để người dùng Plus mở DM lấy bản full.
-    """
     lock = "🔒"
     tps_lock = lock
     label = _label_from_tf(sig.timeframe)
     return (
         f"<b>{sig.symbol} {sig.timeframe} ({label})</b>\n"
+        f"Setup: {sig.strategy}\n"
         f"Entry: <tg-spoiler>{lock}</tg-spoiler> | "
         f"SL: <tg-spoiler>{lock}</tg-spoiler> | "
         f"TP: <tg-spoiler>{tps_lock}</tg-spoiler>"
@@ -225,13 +208,8 @@ def post_signal(
     min_plus_between_free: int = 5,
     force_free: bool = False,
     ignore_quota: bool = False,
-    join_btn_url: Optional[str] = None  # link landing/FAQ thanh toán
+    join_btn_url: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    - Quyết định FREE/PLUS theo policy hàng ngày.
-    - FREE -> gửi full ngay trên channel.
-    - PLUS -> gửi teaser + nút deep-link '🔓 Xem đầy đủ', kèm nút upgrade nếu có join_btn_url.
-    """
     is_free = policy.decide_is_free(
         max_free_per_day=max_free_per_day,
         min_plus_between_free=min_plus_between_free,
@@ -261,8 +239,4 @@ def post_signal(
         reply_markup=markup,
         disable_web_page_preview=True
     )
-    return {
-        "mode": "FREE" if is_free else "PLUS",
-        "chat_id": msg.chat.id,
-        "message_id": msg.message_id
-    }
+    return {"mode": "FREE" if is_free else "PLUS", "chat_id": msg.chat.id, "message_id": msg.message_id}
