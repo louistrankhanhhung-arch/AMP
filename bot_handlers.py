@@ -8,7 +8,7 @@ from typing import Set
 from telebot import TeleBot, types
 
 # Membership core
-from app.membership import (
+from membership import (
     has_plus,
     activate_plus,
     get_expiry,
@@ -16,10 +16,10 @@ from app.membership import (
 )
 
 # Nội dung signal để mở khóa trong DM
-from app.signal_tracker import render_full_signal_by_id
+from signal_tracker import render_full_signal_by_id
 # Tóm tắt/teaser khi user chưa Plus (tùy chọn, nếu không có sẽ fallback)
 try:
-    from app.performance_logger import summarize_signal
+    from performance_logger import summarize_signal
 except Exception:
     summarize_signal = None  # type: ignore
 
