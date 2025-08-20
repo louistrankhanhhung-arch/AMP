@@ -13,7 +13,6 @@ Yêu cầu:
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
-import os
 import sqlite3
 import datetime as dt
 
@@ -50,7 +49,7 @@ class DailyQuotaPolicy:
     Quy tắc:
     - Mỗi ngày tối đa `max_free_per_day` post FREE (mặc định 2).
     - Chỉ cho FREE khi đã có ít nhất `min_plus_between_free` bài PLUS kể từ lần FREE gần nhất
-      (mặc định 5) -> giúp phân tán đều kiểu ~ 2 FREE / ~10 PLUS.
+      (mặc định 5).
     - Có thể ép post FREE qua `force_free=True`.
     """
 
@@ -63,53 +62,60 @@ class DailyQuotaPolicy:
         return sqlite3.connect(self.db_path)
 
     def _ensure(self):
-    conn = self._conn()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "CREATE TABLE IF NOT EXISTS policy_state("
-            "key TEXT PRIMARY KEY, "
-            "day TEXT, "
-            "free_count INTEGER, "
-            "plus_count INTEGER, "
-            "plus_since_last_free INTEGER, "
-            "last_post_ts TEXT)"
-        )
-        cur.execute("SELECT 1 FROM policy_state WHERE key=?", (self.key,))
-        row = cur.fetchone()
-        if row is None:
+        conn = self._conn()
+        try:
+            cur = conn.cursor()
             cur.execute(
-                "INSERT INTO policy_state(key, day, free_count, plus_count, plus_since_last_free, last_post_ts) "
-                "VALUES(?,?,?,?,?,?)",
-                (self.key, self._today(), 0, 0, 0, dt.datetime.utcnow().isoformat()),
+                "CREATE TABLE IF NOT EXISTS policy_state("
+                "key TEXT PRIMARY KEY, "
+                "day TEXT, "
+                "free_count INTEGER, "
+                "plus_count INTEGER, "
+                "plus_since_last_free INTEGER, "
+                "last_post_ts TEXT)"
             )
-        conn.commit()
-    finally:
-        conn.close()
-
+            cur.execute("SELECT 1 FROM policy_state WHERE key=?", (self.key,))
+            row = cur.fetchone()
+            if row is None:
+                cur.execute(
+                    "INSERT INTO policy_state(key, day, free_count, plus_count, plus_since_last_free, last_post_ts) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (self.key, self._today(), 0, 0, 0, dt.datetime.utcnow().isoformat()),
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
     def _today(self) -> str:
         return dt.datetime.utcnow().strftime("%Y-%m-%d")
 
     def _load(self):
-        c = self._conn()
-        cur = c.execute(
-            "SELECT day, free_count, plus_count, plus_since_last_free FROM policy_state WHERE key=?",
-            (self.key,)
-        )
-        row = cur.fetchone(); c.close()
-        if not row:
-            return self._today(), 0, 0, 0
-        return row[0], int(row[1]), int(row[2]), int(row[3])
+        conn = self._conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT day, free_count, plus_count, plus_since_last_free FROM policy_state WHERE key=?",
+                (self.key,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return self._today(), 0, 0, 0
+            return row[0], int(row[1]), int(row[2]), int(row[3])
+        finally:
+            conn.close()
 
     def _save(self, day: str, free_count: int, plus_count: int, plus_since_last_free: int):
-        c = self._conn()
-        c.execute(
-            "UPDATE policy_state SET day=?, free_count=?, plus_count=?, plus_since_last_free=?, last_post_ts=? "
-            "WHERE key=?",
-            (day, free_count, plus_count, plus_since_last_free, dt.datetime.utcnow().isoformat(), self.key)
-        )
-        c.commit(); c.close()
+        conn = self._conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE policy_state SET day=?, free_count=?, plus_count=?, plus_since_last_free=?, last_post_ts=? "
+                "WHERE key=?",
+                (day, free_count, plus_count, plus_since_last_free, dt.datetime.utcnow().isoformat(), self.key),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def _roll_day_if_needed(self):
         day, free_c, plus_c, plus_gap = self._load()
@@ -143,13 +149,11 @@ class DailyQuotaPolicy:
         # Điều kiện FREE theo quota + giãn cách
         if not ignore_quota:
             if free_c >= max_free_per_day:
-                # hết suất FREE -> PLUS
                 plus_c += 1
                 plus_gap += 1
                 self._save(day, free_c, plus_c, plus_gap)
                 return False
             if plus_gap < min_plus_between_free:
-                # chưa đủ bài PLUS xen kẽ -> PLUS
                 plus_c += 1
                 plus_gap += 1
                 self._save(day, free_c, plus_c, plus_gap)
@@ -180,9 +184,10 @@ def render_full(sig: Signal) -> str:
     lev = f"\n<b>Leverage:</b> x{sig.leverage}" if sig.leverage else ""
     eta = f"\n<b>ETA:</b> {sig.eta}" if sig.eta else ""
     label = _label_from_tf(sig.timeframe)
+    entry_txt = _fmt_price(sig.entries[0]) if (sig.entries and len(sig.entries) > 0) else "-"
     return (
         f"<b>#{sig.symbol}</b> — <b>{sig.side.upper()}</b> {sig.timeframe} ({label})\n"
-        f"<b>Entry:</b> {_fmt_price(sig.entries[0])}\n"
+        f"<b>Entry:</b> {entry_txt}\n"
         f"<b>SL:</b> {_fmt_price(sig.sl)}\n"
         f"{tps}{lev}{eta}"
     )
@@ -226,7 +231,7 @@ def post_signal(
     """
     - Quyết định FREE/PLUS theo policy hàng ngày.
     - FREE -> gửi full ngay trên channel.
-    - PLUS -> gửi teaser + nút deep-link '🔓 Xem đầy đủ'.
+    - PLUS -> gửi teaser + nút deep-link '🔓 Xem đầy đủ', kèm nút upgrade nếu có join_btn_url.
     """
     is_free = policy.decide_is_free(
         max_free_per_day=max_free_per_day,
