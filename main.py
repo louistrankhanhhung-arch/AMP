@@ -18,13 +18,13 @@ from pydantic import BaseModel
 try:
     from indicators import enrich_indicators, enrich_more
 except Exception:  # fallback an toàn nếu thiếu
-    enrich_indicators = lambda x: x
-    enrich_more = lambda x: x
+    enrich_indicators = lambda x: x  # type: ignore
+    enrich_more = lambda x: x  # type: ignore
 
 try:
     from kucoin_api import fetch_ohlcv  # hàm lấy OHLCV theo TF
 except Exception:
-    fetch_ohlcv = None
+    fetch_ohlcv = None  # type: ignore
 
 from universe import resolve_symbols
 from gpt_signal_builder import make_telegram_signal
@@ -35,7 +35,7 @@ try:
     from notifier import TelegramNotifier, PostRef
     from signal_tracker import SignalTracker
 except Exception:
-    TgSignal = DailyQuotaPolicy = post_signal = TelegramNotifier = PostRef = SignalTracker = None
+    TgSignal = DailyQuotaPolicy = post_signal = TelegramNotifier = PostRef = SignalTracker = None  # type: ignore
 
 # ---- Logging ----
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -71,9 +71,9 @@ _TRACKER = None
 
 if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID and TgSignal and DailyQuotaPolicy and post_signal:
     try:
-        _NOTIFIER = TelegramNotifier(token=TELEGRAM_BOT_TOKEN, default_chat_id=TELEGRAM_CHANNEL_ID)
-        _BOT = _NOTIFIER.bot
-        _TRACKER = SignalTracker(_NOTIFIER)
+        _NOTIFIER = TelegramNotifier(token=TELEGRAM_BOT_TOKEN, default_chat_id=TELEGRAM_CHANNEL_ID)  # type: ignore
+        _BOT = _NOTIFIER.bot  # type: ignore
+        _TRACKER = SignalTracker(_NOTIFIER)  # type: ignore
         logging.info("[telegram] bot & tracker ready")
     except Exception as e:
         logging.warning(f"[telegram] init failed: {e}")
@@ -124,25 +124,25 @@ def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for sym in symbols:
         try:
-            if fetch_ohlcv is None:
+            if fetch_ohlcv is None:  # type: ignore
                 logging.warning("[build] fetch_ohlcv not available; skip %s", sym)
                 continue
 
             # lấy dữ liệu từng khung
-            df1h_raw = fetch_ohlcv(sym, timeframe="1H", limit=300)
-            df4h_raw = fetch_ohlcv(sym, timeframe="4H", limit=300)
-            df1d_raw = fetch_ohlcv(sym, timeframe="1D", limit=300)
+            df1h_raw = fetch_ohlcv(sym, timeframe="1H", limit=300)  # type: ignore
+            df4h_raw = fetch_ohlcv(sym, timeframe="4H", limit=300)  # type: ignore
+            df1d_raw = fetch_ohlcv(sym, timeframe="1D", limit=300)  # type: ignore
 
             # enrich cho mọi TF
             df1h = enrich_more(enrich_indicators(df1h_raw)) if df1h_raw is not None else None
             df4h = enrich_more(enrich_indicators(df4h_raw)) if df4h_raw is not None else None
             df1d = enrich_more(enrich_indicators(df1d_raw)) if df1d_raw is not None else None
 
+            # thiếu (None) hoặc rỗng (0 rows) thì bỏ
             if any(d is None or getattr(d, "empty", False) for d in (df1h, df4h, df1d)):
                 logging.info(f"[build] missing TF for {sym}")
                 continue
 
-            # Ở đây make_telegram_signal kỳ vọng input dạng struct/df đã enrich
             out.append({
                 "symbol": sym,
                 "1H": df1h,
@@ -158,7 +158,7 @@ def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
 def _call_gpt_with_backoff(s4h, s1d, s1h):
     delay = RATE_SLEEP_SECS
     last_exc = None
-    for attempt in range(GPT_MAX_RETRIES + 1):
+    for _ in range(GPT_MAX_RETRIES + 1):
         try:
             return make_telegram_signal(s4h, s1d, trigger_1h=s1h)
         except Exception as e:
@@ -169,7 +169,6 @@ def _call_gpt_with_backoff(s4h, s1d, s1h):
                 delay = min(delay * 2, 15.0)
                 continue
             raise
-    # nếu hết retry
     raise last_exc if last_exc else RuntimeError("GPT call failed without exception")
 
 
@@ -190,7 +189,7 @@ def scan_once_for_logs():
     # Tạo policy 1 lần cho cả lượt quét
     policy = None
     if DailyQuotaPolicy:
-        policy = DailyQuotaPolicy(db_path=POLICY_DB, key=POLICY_KEY)
+        policy = DailyQuotaPolicy(db_path=POLICY_DB, key=POLICY_KEY)  # type: ignore
 
     sent = 0
     for sym in picked:
@@ -198,7 +197,12 @@ def scan_once_for_logs():
             s1h = next((x["1H"] for x in structs if x["symbol"] == sym), None)
             s4h = next((x["4H"] for x in structs if x["symbol"] == sym), None)
             s1d = next((x["1D"] for x in structs if x["symbol"] == sym), None)
-            missing_tfs = [tf for tf, df in (("1H", s1h), ("4H", s4h), ("1D", s1d)) if (df is None or (hasattr(df, "empty") and df.empty))]
+
+            # thiếu TF thì bỏ qua, log rõ TF nào
+            missing_tfs = [
+                tf for tf, df in (("1H", s1h), ("4H", s4h), ("1D", s1d))
+                if (df is None or (hasattr(df, "empty") and getattr(df, "empty")))
+            ]
             if missing_tfs:
                 print(f"[scan] missing structs: {sym} (missing {','.join(missing_tfs)})")
                 continue
@@ -234,9 +238,9 @@ def scan_once_for_logs():
             else:
                 # ENTER hoặc N/A: in signal nếu có, ưu tiên 1 dòng súc tích nếu thiếu `tele`
                 if tele:
-                    print("[signal]\n" + tele)
+                    print("[signal]
+" + tele)
                 else:
-                    # log tối thiểu cho ENTER/N/A
                     entries = plan.get("entries") or []
                     slv = plan.get("sl")
                     tps = plan.get("tps") or []
@@ -255,8 +259,8 @@ def scan_once_for_logs():
                     print("[signal] " + " | ".join(fields))
 
             if out.get("analysis_text"):
-                # có thể dài → chỉ in nếu cần
-                print("[analysis]\n" + out["analysis_text"])
+                print("[analysis]
+" + out["analysis_text"])  # có thể dài
             sent += 1
 
             # >>> Chỉ post khi action == ENTER <<<
@@ -292,16 +296,16 @@ def scan_once_for_logs():
                     eta=plan.get("eta"),
                 )
 
-                info = post_signal(
-                    bot=_BOT,
+                info = post_signal(  # type: ignore
+                    bot=_BOT,  # type: ignore
                     channel_id=TELEGRAM_CHANNEL_ID,
                     sig=tg_sig,
-                    policy=policy,
+                    policy=policy,  # type: ignore
                     join_btn_url=JOIN_URL,
                 )
 
                 if info and _TRACKER and PostRef:
-                    post_ref = PostRef(chat_id=info["chat_id"], message_id=info["message_id"])
+                    post_ref = PostRef(chat_id=info["chat_id"], message_id=info["message_id"])  # type: ignore
                     signal_payload = {
                         "symbol": sym,
                         "side": tg_sig.side,
@@ -313,7 +317,7 @@ def scan_once_for_logs():
                     sl_mode = (plan.get("sl_mode") or "tick")
                     if sl_mode == "hard":
                         sl_mode = "tick"
-                    _TRACKER.register_post(
+                    _TRACKER.register_post(  # type: ignore
                         signal_id=tg_sig.signal_id,
                         ref=post_ref,
                         signal=signal_payload,
@@ -371,6 +375,15 @@ def api_scan_once(req: ScanOnceReq):
             s1h = next((x["1H"] for x in structs if x["symbol"] == sym), None)
             s4h = next((x["4H"] for x in structs if x["symbol"] == sym), None)
             s1d = next((x["1D"] for x in structs if x["symbol"] == sym), None)
+
+            missing_tfs = [
+                tf for tf, df in (("1H", s1h), ("4H", s4h), ("1D", s1d))
+                if (df is None or (hasattr(df, "empty") and getattr(df, "empty")))
+            ]
+            if missing_tfs:
+                print(f"[scan] missing structs: {sym} (missing {','.join(missing_tfs)})")
+                continue
+
             out = _call_gpt_with_backoff(s4h, s1d, s1h)
             print(json.dumps(out, ensure_ascii=False))
         return {"ok": True, "count": len(req.symbols)}
