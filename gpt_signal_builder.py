@@ -236,13 +236,17 @@ def build_messages_classify(
     return [system, user]
 
 # ====== Hàm chính ======
-def make_telegram_signal(s4h, s1d, trigger_1h=None, *args, **kwargs):
-    if not (_df_ok(s4h) and _df_ok(s1d) and (_df_ok(trigger_1h) if trigger_1h is not None else True)):
-        return {"ok": False, "error": "missing/empty frame(s)"}
-    struct_4h: Dict[str, Any],
-    struct_1d: Dict[str, Any],
-    trigger_1h: Optional[Dict[str, Any]] = None,
+def make_telegram_signal(
+    s4h: Any,
+    s1d: Any,
+    trigger_1h: Optional[Any] = None,
+    *args,
+    **kwargs,
 ) -> Dict[str, Any]:
+    # Guard: dữ liệu thiếu/rỗng thì bỏ sớm
+    if not (_df_ok(s4h) and _df_ok(s1d) and (trigger_1h is None or _df_ok(trigger_1h))):
+        return {"ok": False, "error": "missing/empty frame(s)"}
+    # ... phần thân hàm giữ nguyên ...
     """
     - Gọi GPT-4o với 1H/4H/1D đầy đủ.
     - Nhận 2 kế hoạch: intraday_1h & swing_4h.
