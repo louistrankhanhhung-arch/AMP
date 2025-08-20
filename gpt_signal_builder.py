@@ -3,41 +3,79 @@ import os
 import json
 import time
 from typing import Any, Dict, List, Optional
+from datetime import datetime
 
 from openai import OpenAI
 
 # ==== Debug helpers (from performance_logger) ====
 # Bật bằng ENV: DEBUG_GPT_INPUT=1 (và tuỳ chọn DEBUG_GPT_DIR)
 try:
-    from performance_logger import debug_dump_gpt_input, debug_print_gpt_input
+    from performance_logger import debug_dump_gpt_input, debug_print_gpt_input  # type: ignore
 except Exception:
-    # fallback no-op nếu chưa có helper (tránh lỗi import khi chạy unit test)
-    def debug_dump_gpt_input(symbol: str, ctx: Dict[str, Any], tag: str = "ctx") -> None: ...
-    def debug_print_gpt_input(ctx: Dict[str, Any]) -> None: ...
+    # ---- Fallback: tự in/ghi file nếu thiếu helper ----
+    def _debug_enabled() -> bool:
+        return os.getenv("DEBUG_GPT_INPUT", "0") == "1"
 
+    def debug_print_gpt_input(ctx: Dict[str, Any]) -> None:
+        if not _debug_enabled():
+            return
+        try:
+            txt = json.dumps(ctx, ensure_ascii=False, indent=2)
+            # Tránh log quá dài
+            MAX_LEN = 150_000
+            if len(txt) > MAX_LEN:
+                txt = txt[:MAX_LEN] + "\n... [truncated]"
+            print("[DEBUG GPT INPUT] context:\n", txt)
+        except Exception:
+            pass
+
+    def debug_dump_gpt_input(symbol: str, ctx: Dict[str, Any], tag: str = "ctx") -> None:
+        if not _debug_enabled():
+            return
+        try:
+            out_dir = os.getenv("DEBUG_GPT_DIR", "/mnt/data/gpt_inputs")
+            os.makedirs(out_dir, exist_ok=True)
+            ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+            safe_sym = (symbol or "SYMBOL").replace("/", "")
+            path = os.path.join(out_dir, f"{safe_sym}_{tag}_{ts}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(ctx, f, ensure_ascii=False, indent=2)
+            print(f"[DEBUG] saved GPT input -> {path}")
+        except Exception:
+            pass
 
 # ====== Config ======
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # dùng gpt-4o theo yêu cầu
 client = OpenAI()
 
-# ====== Schema output mong đợi từ GPT ======
+# ====== Schema output mong đợi từ GPT (2 kế hoạch) ======
 CLASSIFY_SCHEMA = {
     "symbol": "BTC/USDT",
-    "decision": "ENTER | WAIT | AVOID",
-    "side": "long | short",
-    "confidence": 0.0,
-    "strategy": "trend-follow | breakout | retest | reclaim | range | countertrend",
-    "entry": [0.0],   # hoặc "entries"
-    "entries": [0.0],
-    "sl": 0.0,
-    "tp": [0.0, 0.0],  # hoặc "tps"
-    "tps": [0.0, 0.0],
-    "reasons": ["..."],
-    "trigger_hint": "nếu WAIT: nêu điều kiện kích hoạt",
-    "leverage": None,
-    "eta": None,
+    "plans": {
+        "intraday_1h": {
+            "decision": "ENTER | WAIT | AVOID",
+            "side": "long | short",
+            "confidence": 0.0,
+            "strategy": "retest | reclaim | breakout | range | countertrend",
+            "entries": [0.0],
+            "sl": 0.0,
+            "tps": [0.0, 0.0],
+            "reasons": ["..."],
+            "trigger_hint": "nếu WAIT: nêu điều kiện kích hoạt cụ thể"
+        },
+        "swing_4h": {
+            "decision": "ENTER | WAIT | AVOID",
+            "side": "long | short",
+            "confidence": 0.0,
+            "strategy": "trend-follow | breakout | retest | range",
+            "entries": [0.0],
+            "sl": 0.0,
+            "tps": [0.0, 0.0],
+            "reasons": ["..."],
+            "trigger_hint": "nếu WAIT: nêu điều kiện kích hoạt cụ thể"
+        }
+    }
 }
-
 
 # ====== Helpers ======
 def _safe(d: Optional[Dict], *keys, default=None):
@@ -47,7 +85,6 @@ def _safe(d: Optional[Dict], *keys, default=None):
             return default
         cur = cur.get(k)
     return default if cur is None else cur
-
 
 def _parse_json_from_text(txt: str) -> Dict[str, Any]:
     """
@@ -78,11 +115,18 @@ def _parse_json_from_text(txt: str) -> Dict[str, Any]:
     except Exception:
         return {}
 
+def _fmt_list(nums):
+    if not nums:
+        return "-"
+    try:
+        return ", ".join(f"{float(x):.6f}" for x in nums)
+    except Exception:
+        return ", ".join(str(x) for x in nums)
 
-def _render_simple_signal(symbol: str, decision: Dict[str, Any]) -> str:
+def _render_simple_signal(symbol: str, decision: Dict[str, Any], label: str | None = None) -> str:
     """
     Format Telegram *chỉ dùng khi ENTER*:
-    {Direction} | {Mã}
+    {Direction} | {Mã} (LABEL)
     Leverage:
     Entry:
     SL:
@@ -90,55 +134,47 @@ def _render_simple_signal(symbol: str, decision: Dict[str, Any]) -> str:
     """
     side = (decision.get("side") or "long").lower()
     direction = "Long" if side == "long" else "Short"
-    leverage = decision.get("leverage")
     entries = decision.get("entries") or decision.get("entry") or []
     tps = decision.get("tps") or decision.get("tp") or []
     sl = decision.get("sl")
+    leverage = decision.get("leverage")
 
-    def _fmt_list(nums):
-        if not nums:
-            return "-"
-        try:
-            return ", ".join(f"{float(x):.6f}" for x in nums)
-        except Exception:
-            return ", ".join(str(x) for x in nums)
+    hdr = f"{direction} | {symbol.replace('/', '')}"
+    if label:
+        hdr += f" ({label})"
 
-    body = [
-        f"{direction} | {symbol.replace('/', '')}",
+    return "\n".join([
+        hdr,
         f"Leverage: {leverage if leverage is not None else '-'}",
         f"Entry: {_fmt_list(entries)}",
-        f"SL: {('-' if sl is None else (f'{float(sl):.6f}' if isinstance(sl, (int, float, str)) else str(sl)))}",
+        f"SL: {('-' if sl is None else (f'{float(sl):.6f}' if isinstance(sl,(int,float,str)) else str(sl)))}",
         f"TP: {_fmt_list(tps)}",
-    ]
-    return "\n".join(body)
+    ])
 
-
-def _analysis_text(symbol: str, decision: Dict[str, Any]) -> str:
-    """
-    Text phân tích cho log:
-    - ENTER: list reasons gọn.
-    - WAIT: nêu reasons + trigger_hint.
-    - AVOID: reasons ngắn.
-    """
+def _analysis_lines(symbol: str, decision: Dict[str, Any], tag: str) -> List[str]:
     act = (decision.get("decision") or decision.get("action") or "").upper()
     side = (decision.get("side") or "long").lower()
+    conf = decision.get("confidence")
     reasons = decision.get("reasons") or []
     hint = decision.get("trigger_hint")
 
-    # gom bullets 3–8 dòng tối đa
-    bullets = []
+    lines = [f"[ĐÁNH GIÁ {tag}] {symbol} | {act} | side={side} | conf={conf}"]
     for r in reasons[:8]:
         if isinstance(r, str) and r.strip():
-            bullets.append(f"- {r.strip()}")
-
+            lines.append(f"- {r.strip()}")
     if act == "WAIT" and hint:
-        bullets.append(f"- Trigger: {hint}")
+        lines.append(f"- Trigger: {hint}")
+    return lines
 
-    hdr = f"[ĐÁNH GIÁ] {symbol} | {act} | side={side} | conf={decision.get('confidence')}"
-    if bullets:
-        return hdr + "\n" + "\n".join(bullets)
-    return hdr
-
+def _merge_analysis(symbol: str, p1: Optional[Dict[str, Any]], p2: Optional[Dict[str, Any]]) -> str:
+    blocks: List[str] = []
+    if p1:
+        blocks.append("\n".join(_analysis_lines(symbol, p1, "INTRADAY")))
+    if p2:
+        blocks.append("\n".join(_analysis_lines(symbol, p2, "SWING")))
+    if not blocks:
+        return f"[ĐÁNH GIÁ] {symbol} | N/A"
+    return "\n\n".join(blocks)
 
 # ====== Prompt xây dựng ======
 def build_messages_classify(
@@ -147,7 +183,7 @@ def build_messages_classify(
     trigger_1h: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Giữ API cũ: trigger_1h là *full struct 1H*.
+    Gửi đầy đủ context 1D/4H/1H. Yêu cầu GPT trả về 2 kế hoạch song song.
     """
     ctx = {
         "struct_4h": struct_4h,
@@ -163,24 +199,22 @@ def build_messages_classify(
             or _safe(trigger_1h, "symbol")
             or "SYMBOL"
         )
-        debug_print_gpt_input(ctx)
-        debug_dump_gpt_input(sym_for_dump, ctx, tag="ctx")
+        debug_print_gpt_input(ctx)                  # in ra log
+        debug_dump_gpt_input(sym_for_dump, ctx, tag="ctx")  # ghi file (nếu bật)
     except Exception:
-        # không để debug làm hỏng flow chính
         pass
 
     system = {
         "role": "system",
         "content": (
-            "Bạn là trader kỹ thuật. Hãy phân loại một mã thành ENTER / WAIT / AVOID "
-            "dựa trên JSON 3 khung **1D / 4H / 1H (đầy đủ)**.\n"
-            "Quy tắc:\n"
-            "- ENTER: 1D–4H–1H đồng pha và có xác nhận (breakout/reclaim/retest) với volume ủng hộ; "
-            "R:R hợp lý theo targets/levels → cung cấp Entry/SL/TP.\n"
-            "- WAIT: xu hướng lớn ủng hộ nhưng thiếu xác nhận 1H → chỉ log, kèm trigger_hint (điểm/kịch bản kích hoạt cụ thể).\n"
-            "- AVOID: đi ngược 1D rõ rệt, hoặc R:R xấu/levels tắc/thiếu thanh khoản → log lý do ngắn.\n"
-            "Chấp nhận RSI>70/<30 nếu đi cùng breakout có volume (không loại oan). "
-            "Chỉ trả JSON theo schema sau (tiếng Việt):\n"
+            "Bạn là trader kỹ thuật. Với JSON 3 khung **1D / 4H / 1H**, hãy trả về **2 kế hoạch độc lập**:\n"
+            "1) intraday_1h: setup theo 1H (lướt sóng ngắn).\n"
+            "2) swing_4h: setup theo 4H (đồng pha 1D, giữ lệnh dài hơn).\n\n"
+            "Tiêu chuẩn:\n"
+            "- Intraday (1H): chấp nhận RSI quá mua/bán nếu có xác nhận volume; yêu cầu R:R ≥ 1.5; ưu tiên reclaim/retest/mini-breakout; SL chặt; vị thế ≤ 0.3–0.5R.\n"
+            "- Swing (4H): 4H phải đồng pha với 1D; tránh trade ngược xu hướng lớn; yêu cầu R:R ≥ 2.0; vị thế 1.0R chuẩn.\n"
+            "Nếu WAIT: thêm trigger_hint (điểm hoặc kịch bản cụ thể). Nếu AVOID: ghi lý do ngắn gọn.\n"
+            "Trả về JSON đúng theo schema sau (tiếng Việt, KHÔNG thêm văn bản ngoài JSON):\n"
             + json.dumps(CLASSIFY_SCHEMA, ensure_ascii=False)
         ),
     }
@@ -193,8 +227,7 @@ def build_messages_classify(
     }
     return [system, user]
 
-
-# ====== Hàm chính: trả về telegram_text/analysis_text theo yêu cầu ======
+# ====== Hàm chính ======
 def make_telegram_signal(
     struct_4h: Dict[str, Any],
     struct_1d: Dict[str, Any],
@@ -202,8 +235,10 @@ def make_telegram_signal(
 ) -> Dict[str, Any]:
     """
     - Gọi GPT-4o với 1H/4H/1D đầy đủ.
-    - Nếu ENTER: tạo telegram_text *đơn giản* (Direction|Mã, Leverage, Entry, SL, TP) + analysis_text để log.
-    - Nếu WAIT/AVOID: KHÔNG tạo telegram_text; chỉ trả analysis_text ngắn gọn (WAIT có trigger_hint).
+    - Nhận 2 kế hoạch: intraday_1h & swing_4h.
+    - Nếu bất kỳ kế hoạch nào ENTER: tạo telegram_text tương ứng (kèm nhãn).
+      Để tương thích ngược: chọn intraday nếu ENTER, nếu không chọn swing; đồng thời trả thêm telegram_texts (list).
+    - WAIT/AVOID: chỉ log analysis (gồm trigger_hint nếu WAIT).
     """
     try:
         msgs = build_messages_classify(struct_4h, struct_1d, trigger_1h=trigger_1h)
@@ -211,7 +246,7 @@ def make_telegram_signal(
             model=DEFAULT_MODEL,
             messages=msgs,
             temperature=0.0,
-            max_tokens=1800,
+            max_tokens=2200,
         )
         raw = (resp.choices[0].message.content or "").strip()
         data = _parse_json_from_text(raw)
@@ -219,80 +254,102 @@ def make_telegram_signal(
         if not isinstance(data, dict) or not data:
             return {"ok": False, "error": "GPT không trả JSON hợp lệ", "raw": raw}
 
-        # Chuẩn hoá fields
         symbol = (
             data.get("symbol")
             or _safe(struct_4h, "symbol")
             or _safe(struct_1d, "symbol")
             or "SYMBOL"
         )
-        decision_str = (data.get("decision") or data.get("action") or "WAIT").upper()
-        side = (data.get("side") or "long").lower()
 
-        decision: Dict[str, Any] = {
-            "decision": decision_str,
-            "side": side,
-            "confidence": data.get("confidence"),
-            "strategy": data.get("strategy"),
-            "entries": data.get("entries") or data.get("entry") or [],
-            "sl": data.get("sl"),
-            "tps": data.get("tps") or data.get("tp") or [],
-            "reasons": data.get("reasons") or (data.get("analysis") and [data["analysis"]] or []),
-            "trigger_hint": data.get("trigger_hint"),
-            "leverage": data.get("leverage"),
-            "eta": data.get("eta"),
-        }
+        plans = data.get("plans") or {}
+        p_intra = plans.get("intraday_1h") or {}
+        p_swing = plans.get("swing_4h") or {}
 
-        # Tạo output theo 3 nhánh
-        telegram_text = None
-        analysis_text = _analysis_text(symbol, decision)
-
-        if decision_str == "ENTER":
-            telegram_text = _render_simple_signal(symbol, decision)
-        elif decision_str in ("WAIT", "AVOID"):
-            telegram_text = None
-        else:
-            # Bất ngờ/khác → coi như WAIT
-            decision["decision"] = "WAIT"
-            telegram_text = None
-
-        # Gợi ý "plan" tối giản cho dòng post/track
-        plan = None
-        if decision["decision"] == "ENTER":
-            plan = {
-                "signal_id": f"{symbol.replace('/', '')}-{int(time.time())}",
-                "timeframe": "4H",
-                "side": decision["side"],
-                "strategy": decision.get("strategy") or "GPT-plan",
-                "entries": decision.get("entries") or [],
-                "sl": decision.get("sl"),
-                "tps": decision.get("tps") or [],
-                "leverage": decision.get("leverage"),
-                "eta": decision.get("eta"),
+        # Chuẩn hoá fields cho từng plan
+        def _norm(p: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "decision": (p.get("decision") or p.get("action") or "WAIT").upper(),
+                "side": (p.get("side") or "long").lower(),
+                "confidence": p.get("confidence"),
+                "strategy": p.get("strategy"),
+                "entries": p.get("entries") or p.get("entry") or [],
+                "sl": p.get("sl"),
+                "tps": p.get("tps") or p.get("tp") or [],
+                "reasons": p.get("reasons") or (p.get("analysis") and [p["analysis"]] or []),
+                "trigger_hint": p.get("trigger_hint"),
+                "leverage": p.get("leverage"),
+                "eta": p.get("eta"),
             }
+
+        p_intra = _norm(p_intra)
+        p_swing = _norm(p_swing)
+
+        # Build telegram texts (nếu ENTER)
+        telegram_texts: List[str] = []
+        enter_plans: List[Dict[str, Any]] = []
+
+        if p_intra["decision"] == "ENTER":
+            telegram_texts.append(_render_simple_signal(symbol, p_intra, label="INTRADAY"))
+            enter_plans.append({"label": "INTRADAY", **p_intra})
+
+        if p_swing["decision"] == "ENTER":
+            telegram_texts.append(_render_simple_signal(symbol, p_swing, label="SWING"))
+            enter_plans.append({"label": "SWING", **p_swing})
+
+        # Tương thích ngược: chọn 1 plan “chính” nếu có
+        telegram_text = None
+        plan_primary = None
+        if telegram_texts:
+            # ưu tiên intraday; nếu không có thì swing
+            if p_intra["decision"] == "ENTER":
+                telegram_text = telegram_texts[0]  # intraday đứng trước nếu có
+                plan_primary = {
+                    "signal_id": f"{symbol.replace('/','')}-{int(time.time())}",
+                    "timeframe": "1H",
+                    "side": p_intra["side"],
+                    "strategy": p_intra.get("strategy") or "GPT-plan",
+                    "entries": p_intra.get("entries") or [],
+                    "sl": p_intra.get("sl"),
+                    "tps": p_intra.get("tps") or [],
+                    "leverage": p_intra.get("leverage"),
+                    "eta": p_intra.get("eta"),
+                }
+            else:
+                telegram_text = telegram_texts[-1]  # swing
+                plan_primary = {
+                    "signal_id": f"{symbol.replace('/','')}-{int(time.time())}",
+                    "timeframe": "4H",
+                    "side": p_swing["side"],
+                    "strategy": p_swing.get("strategy") or "GPT-plan",
+                    "entries": p_swing.get("entries") or [],
+                    "sl": p_swing.get("sl"),
+                    "tps": p_swing.get("tps") or [],
+                    "leverage": p_swing.get("leverage"),
+                    "eta": p_swing.get("eta"),
+                }
+
+        # Phần phân tích (gộp 2 block)
+        analysis_text = _merge_analysis(symbol, p_intra, p_swing)
 
         return {
             "ok": True,
-            "signal_id": plan and plan["signal_id"],
-            "telegram_text": telegram_text,   # chỉ có khi ENTER
-            "analysis_text": analysis_text,   # luôn có
-            "decision": {
-                "action": decision["decision"],
-                "side": decision["side"],
-                "confidence": decision.get("confidence"),
-                "strategy": decision.get("strategy"),
-                "entries": decision.get("entries"),
-                "sl": decision.get("sl"),
-                "tps": decision.get("tps"),
-                "reasons": decision.get("reasons"),
-                "trigger_hint": decision.get("trigger_hint"),
-                "leverage": decision.get("leverage"),
-                "eta": decision.get("eta"),
+            "symbol": symbol,
+            # tương thích ngược:
+            "telegram_text": telegram_text,           # 1 message chính (nếu có)
+            "analysis_text": analysis_text,           # luôn có
+            "plan": plan_primary,                     # 1 plan chính (nếu có)
+            # mở rộng:
+            "telegram_texts": telegram_texts,         # tất cả ENTER
+            "plans": {                                # trả full 2 plan
+                "intraday_1h": p_intra,
+                "swing_4h": p_swing
             },
-            "plan": plan,   # chỉ khi ENTER
+            "enter_plans": enter_plans,               # các plan ENTER có nhãn
             "meta": {
-                "confidence": decision.get("confidence"),
-                "eta": decision.get("eta"),
+                "intraday_decision": p_intra["decision"],
+                "swing_decision": p_swing["decision"],
+                "intraday_conf": p_intra.get("confidence"),
+                "swing_conf": p_swing.get("confidence"),
             },
         }
 
