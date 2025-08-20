@@ -1,5 +1,5 @@
 # main.py
-# Quét – tạo – post tín hiệu lên Telegram; bổ sung join_btn_url & (giữ) policy FREE/PLUS
+# Quét – tạo – post tín hiệu lên Telegram; sửa điều kiện post & truyền join_btn_url
 
 import os, threading, time, logging
 import json
@@ -126,6 +126,11 @@ def scan_once_for_logs():
     picked = [x["symbol"] for x in structs][:MAX_GPT]
     print(f"[scan] candidates(no-filter)={picked} (cap {MAX_GPT})")
 
+    # Tạo policy 1 lần cho cả lượt quét
+    policy = None
+    if DailyQuotaPolicy:
+        policy = DailyQuotaPolicy(db_path=POLICY_DB, key=POLICY_KEY)
+
     sent = 0
     for sym in picked:
         try:
@@ -138,16 +143,12 @@ def scan_once_for_logs():
 
             out = make_telegram_signal(s4h, s1d, trigger_1h=s1h)
 
-            if not out.get("ok"):
-                print(f"[scan] GPT err {sym}: {out.get('error')}")
-                continue
-
+            # Log nhanh
             tele = out.get("telegram_text")
             decision = out.get("decision") or {}
             act = str(decision.get("action") or "N/A").upper()
             side = str(decision.get("side") or "none")
             conf = decision.get("confidence")
-
             if tele:
                 print("[signal]\n" + tele)
             else:
@@ -157,14 +158,8 @@ def scan_once_for_logs():
                 print("[analysis]\n" + out["analysis_text"])
             sent += 1
 
-            meta = out.get("meta", {})
-            rr = meta.get("rr", {})
-            print(
-                f"[meta] {sym} conf={meta.get('confidence')} rr_min={rr.get('rr_min')} "
-                f"rr_max={rr.get('rr_max')} eta={meta.get('eta')}"
-            )
-
-            if tele and _BOT and _NOTIFIER and TgSignal and DailyQuotaPolicy and post_signal:
+            # >>> Điều kiện post: chỉ cần out.ok là đủ (ENTER) <<<
+            if out.get("ok") and _BOT and _NOTIFIER and TgSignal and post_signal and policy:
                 plan = out.get("plan") or out.get("signal") or {}
                 tg_sig = TgSignal(
                     signal_id=plan.get("signal_id") or out.get("signal_id") or f"{sym.replace('/','')}-{int(time.time())}",
@@ -178,17 +173,15 @@ def scan_once_for_logs():
                     leverage=plan.get("leverage"),
                     eta=plan.get("eta"),
                 )
-                policy = DailyQuotaPolicy(db_path=POLICY_DB, key=POLICY_KEY)
 
-                # >>> Thêm join_btn_url để hiện nút Nâng cấp/Gia hạn Plus <<<
                 info = post_signal(
                     bot=_BOT,
                     channel_id=TELEGRAM_CHANNEL_ID,
                     sig=tg_sig,
                     policy=policy,
-                    join_btn_url=JOIN_URL,         # <-- dòng mới
-                    # max_free_per_day=2,           # giữ mặc định 2 FREE/ngày
-                    # min_plus_between_free=5,      # giữ mặc định 5 PLUS giữa 2 FREE
+                    join_btn_url=JOIN_URL,         # nút Nâng cấp/Gia hạn Plus
+                    # max_free_per_day=2,           # giữ mặc định
+                    # min_plus_between_free=5,      # giữ mặc định
                 )
 
                 # Nối tracker nếu có
@@ -211,6 +204,7 @@ def scan_once_for_logs():
                         signal=signal_payload,
                         sl_mode=sl_mode,
                     )
+
         except Exception as e:
             print(f"[scan] error processing {sym}: {e}")
             traceback.print_exc()
