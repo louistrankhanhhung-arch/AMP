@@ -231,6 +231,14 @@ def scan_once_for_logs():
             try:
                 out = _call_gpt_with_backoff(s4h, s1d, s1h)
                 time.sleep(RATE_SLEEP_SECS)  # spacing hạ RPM
+                # >>> Guard: GPT trả về không hợp lệ thì bỏ qua mã này
+                if not out.get("ok"):
+                    err = out.get("error") or "parse-fail"
+                    raw = (out.get("raw") or "")[:400]
+                    print(f"[gpt_fail] {sym} | {err}")
+                    if raw:
+                        print("[gpt_raw]\n" + raw)
+                    continue
             
                 tele = out.get("telegram_text")
                 analysis_text = out.get("analysis_text") or ""
