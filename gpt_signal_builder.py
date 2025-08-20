@@ -7,6 +7,14 @@ from datetime import datetime
 
 from openai import OpenAI
 
+def _df_ok(df):
+    return (df is not None) and (not getattr(df, "empty", False))
+
+def _last(df, col):
+    # lấy giá trị cuối cùng an toàn để tránh so sánh Series
+    return float(df[col].iloc[-1])
+
+
 # ==== Debug helpers (from performance_logger) ====
 # Bật bằng ENV: DEBUG_GPT_INPUT=1 (và tuỳ chọn DEBUG_GPT_DIR)
 try:
@@ -228,7 +236,9 @@ def build_messages_classify(
     return [system, user]
 
 # ====== Hàm chính ======
-def make_telegram_signal(
+def make_telegram_signal(s4h, s1d, trigger_1h=None, *args, **kwargs):
+    if not (_df_ok(s4h) and _df_ok(s1d) and (_df_ok(trigger_1h) if trigger_1h is not None else True)):
+        return {"ok": False, "error": "missing/empty frame(s)"}
     struct_4h: Dict[str, Any],
     struct_1d: Dict[str, Any],
     trigger_1h: Optional[Dict[str, Any]] = None,
