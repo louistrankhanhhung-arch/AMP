@@ -13,6 +13,7 @@ from datetime import datetime
 
 from fastapi import FastAPI
 from pydantic import BaseModel
+from bot_handlers import register_handlers
 
 # ====== modules trong repo ======
 try:
@@ -397,6 +398,8 @@ def api_scan_once(req: ScanOnceReq):
     scan_once_for_logs()
     return {"ok": True}
 
+if _BOT:
+    register_handlers(_BOT)
 
 if __name__ == "__main__":
     scan_once_for_logs()
