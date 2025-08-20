@@ -2,7 +2,6 @@
 import os
 import json
 import time
-import re
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
@@ -21,12 +20,15 @@ except Exception:
         if not _debug_enabled():
             return
         try:
-            txt = json.dumps(ctx, ensure_ascii=False, indent=2)
-            # Tránh log quá dài
-            MAX_LEN = 150_000
-            if len(txt) > MAX_LEN:
-                txt = txt[:MAX_LEN] + "\n... [truncated]"
-            print("[DEBUG GPT INPUT] context:\n", txt)
+            out_dir = os.getenv("DEBUG_GPT_DIR", "/mnt/data/gpt_inputs")
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+            path = Path(out_dir)/f"debug_ctx_{ts}.json"
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(ctx, f, ensure_ascii=False, indent=2)
+            # Optional: only print when explicitly allowed
+            if os.getenv("DEBUG_GPT_STDOUT", "0") == "1":
+                print(f"[DEBUG GPT INPUT] saved -> {path}")
         except Exception:
             pass
 
@@ -153,37 +155,33 @@ def _render_simple_signal(symbol: str, decision: Dict[str, Any], label: str | No
     ])
 
 def _analysis_lines(symbol: str, decision: Dict[str, Any], tag: str) -> List[str]:
-    max_len = int(os.getenv("ANALYSIS_REASON_MAX_CHARS", "140"))
     act = (decision.get("decision") or decision.get("action") or "").upper()
     side = (decision.get("side") or "long").lower()
     conf = decision.get("confidence")
     reasons = decision.get("reasons") or []
     hint = decision.get("trigger_hint")
 
-    def _clean_reason(s: str) -> str:
-        s = re.sub(r"[\\{\\}\\[\\]]", "", s)          # bỏ ngoặc để gọn
-        s = re.sub(r"\\s+", " ", s).strip()        # gom khoảng trắng
-        if len(s) > max_len:                      # cắt ngắn
-            s = s[:max_len - 3] + "..."
-        return s
-
     lines = [f"[ĐÁNH GIÁ {tag}] {symbol} | {act} | side={side} | conf={conf}"]
     for r in reasons[:8]:
         if isinstance(r, str) and r.strip():
-            lines.append(f"- {_clean_reason(r)}")
+            lines.append(f"- {r.strip()}")
     if act == "WAIT" and hint:
-        lines.append(f"- Trigger: {_clean_reason(str(hint))}")
+        lines.append(f"- Trigger: {hint}")
     return lines
 
 def _merge_analysis(symbol: str, p1: Optional[Dict[str, Any]], p2: Optional[Dict[str, Any]]) -> str:
     blocks: List[str] = []
     if p1:
-        blocks.append("\\n".join(_analysis_lines(symbol, p1, "INTRADAY")))
+        blocks.append("
+".join(_analysis_lines(symbol, p1, "INTRADAY")))
     if p2:
-        blocks.append("\\n".join(_analysis_lines(symbol, p2, "SWING")))
+        blocks.append("
+".join(_analysis_lines(symbol, p2, "SWING")))
     if not blocks:
         return f"[ĐÁNH GIÁ] {symbol} | N/A"
-    return "\\n\\n".join(blocks)
+    return "
+
+".join(blocks)
 
 # ====== Prompt xây dựng ======
 def build_messages_classify(
@@ -216,14 +214,14 @@ def build_messages_classify(
     system = {
         "role": "system",
         "content": (
-            "Bạn là trader kỹ thuật. Với JSON 3 khung **1D / 4H / 1H**, hãy trả về **2 kế hoạch độc lập**:\\n"
-            "1) intraday_1h: setup theo 1H (lướt sóng ngắn).\\n"
-            "2) swing_4h: setup theo 4H (đồng pha 1D, giữ lệnh dài hơn).\\n\\n"
-            "Tiêu chuẩn:\\n"
-            "- Intraday (1H): chấp nhận RSI quá mua/bán nếu có xác nhận volume; yêu cầu R:R ≥ 1.5; ưu tiên reclaim/retest/mini-breakout; SL chặt; vị thế ≤ 0.3–0.5R.\\n"
-            "- Swing (4H): 4H phải đồng pha với 1D; tránh trade ngược xu hướng lớn; yêu cầu R:R ≥ 2.0; vị thế 1.0R chuẩn.\\n"
-            "Nếu WAIT: thêm trigger_hint (điểm hoặc kịch bản cụ thể). Nếu AVOID: ghi lý do ngắn gọn.\\n"
-            "Trả về JSON đúng theo schema sau (tiếng Việt, KHÔNG thêm văn bản ngoài JSON):\\n"
+            "Bạn là trader kỹ thuật. Với JSON 3 khung **1D / 4H / 1H**, hãy trả về **2 kế hoạch độc lập**:\n"
+            "1) intraday_1h: setup theo 1H (lướt sóng ngắn).\n"
+            "2) swing_4h: setup theo 4H (đồng pha 1D, giữ lệnh dài hơn).\n\n"
+            "Tiêu chuẩn:\n"
+            "- Intraday (1H): chấp nhận RSI quá mua/bán nếu có xác nhận volume; yêu cầu R:R ≥ 1.5; ưu tiên reclaim/retest/mini-breakout; SL chặt; vị thế ≤ 0.3–0.5R.\n"
+            "- Swing (4H): 4H phải đồng pha với 1D; tránh trade ngược xu hướng lớn; yêu cầu R:R ≥ 2.0; vị thế 1.0R chuẩn.\n"
+            "Nếu WAIT: thêm trigger_hint (điểm hoặc kịch bản cụ thể). Nếu AVOID: ghi lý do ngắn gọn.\n"
+            "Trả về JSON đúng theo schema sau (tiếng Việt, KHÔNG thêm văn bản ngoài JSON):\n"
             + json.dumps(CLASSIFY_SCHEMA, ensure_ascii=False)
         ),
     }
