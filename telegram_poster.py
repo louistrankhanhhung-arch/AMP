@@ -194,9 +194,15 @@ def render_teaser(sig: Signal) -> str:
 # 4) Deep-link / post
 # ======================
 
+def _bot_username(bot: TeleBot) -> str:
+    return bot.get_me().username
+
 def make_deeplink(bot: TeleBot, sig: Signal) -> str:
-    username = bot.get_me().username
-    return f"https://t.me/{username}?start=SIG_{sig.signal_id}"
+    return f"https://t.me/{_bot_username(bot)}?start=SIG_{sig.signal_id}"
+
+def make_upgrade_link(bot: TeleBot) -> str:
+    # Không có landing page: deep-link về DM để hiển thị Paywall
+    return f"https://t.me/{_bot_username(bot)}?start=UPGRADE"
 
 def post_signal(
     bot: TeleBot,
@@ -221,15 +227,18 @@ def post_signal(
 
     if is_free:
         text = render_full(sig)
+        # Có thể thêm nút nâng cấp nếu muốn (không bắt buộc)
         if join_btn_url:
             kb.add(types.InlineKeyboardButton("✨ Tham gia VIP Membership", url=join_btn_url))
-        markup = kb if join_btn_url else None
+            markup = kb
+        else:
+            markup = None
     else:
         text = render_teaser(sig)
         deep = make_deeplink(bot, sig)
         kb.add(types.InlineKeyboardButton("🔓 Xem đầy đủ", url=deep))
-        if join_btn_url:
-            kb.add(types.InlineKeyboardButton("✨ Nâng cấp/Gia hạn Plus", url=join_btn_url))
+        upgrade_url = join_btn_url or make_upgrade_link(bot)
+        kb.add(types.InlineKeyboardButton("✨ Nâng cấp/Gia hạn Plus", url=upgrade_url))
         markup = kb
 
     msg = bot.send_message(
