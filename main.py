@@ -203,12 +203,16 @@ def scan_once_for_logs():
             out = make_telegram_signal(s4h, s1d, trigger_1h=s1h)
 
             tele = out.get("telegram_text")
+            plan = out.get("plan") or out.get("signal") or {}
             decision = out.get("decision") or {}
-            action = str(decision.get("action") or "").upper()
-            side = str(decision.get("side") or "none")
-            conf = decision.get("confidence")
+            meta = out.get("meta") or {}
 
-            # Log ngắn
+            action_raw = plan.get("action") or decision.get("action") or meta.get("action") or ""
+            action = str(action_raw).upper()
+
+            # Log ngắn cho dễ debug
+            side = str(decision.get("side") or plan.get("side") or "none")
+            conf = decision.get("confidence") or meta.get("confidence")
             if tele:
                 print("[signal]\n" + tele)
             else:
@@ -218,23 +222,21 @@ def scan_once_for_logs():
                 print("[analysis]\n" + out["analysis_text"])
             sent += 1
 
-            # >>> Chỉ post khi action == ENTER <<<
-            if action != "ENTER":
-                print(f"[post_skip] {sym} action={action} -> skip")
+            # >>> Quyết định có post hay không
+            has_min_fields = bool((plan.get("entries") or []) and (plan.get("sl") is not None))
+            is_enter = (action == "ENTER") or (bool(tele) and has_min_fields)
+
+            if not is_enter:
+                print(f"[post_skip] {sym} action={action or 'N/A'} tele={bool(tele)} -> skip")
                 continue
 
             if _BOT and _NOTIFIER and TgSignal and post_signal and policy and out.get("ok"):
-                plan = out.get("plan") or out.get("signal") or {}
-
                 # Yêu cầu tối thiểu để post
-                entries = plan.get("entries") or []
-                slv = plan.get("sl")
-                if not entries or slv is None:
+                if not has_min_fields:
                     print(f"[post_skip] {sym} missing entries/sl -> skip")
                     continue
 
                 # Strategy: hạn chế 'GPT-plan'
-                meta = out.get("meta") or {}
                 strategy = (
                     plan.get("strategy")
                     or meta.get("strategy")
@@ -249,8 +251,8 @@ def scan_once_for_logs():
                     timeframe=plan.get("timeframe") or "4H",
                     side=plan.get("side") or side or "long",
                     strategy=strategy,
-                    entries=entries,
-                    sl=slv,
+                    entries=plan.get("entries") or [],
+                    sl=plan.get("sl"),
                     tps=plan.get("tps") or [],
                     leverage=plan.get("leverage"),
                     eta=plan.get("eta"),
@@ -297,6 +299,7 @@ def scan_once_for_logs():
             json.dump({"at": start_ts, "picked": picked, "sent": sent}, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print("[scan] write log error:", e)
+
 
 
 # ====== DM FLOW ======
