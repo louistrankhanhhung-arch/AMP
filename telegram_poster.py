@@ -63,8 +63,10 @@ class DailyQuotaPolicy:
         return sqlite3.connect(self.db_path)
 
     def _ensure(self):
-        c = self._conn()
-        c.execute(
+    conn = self._conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
             "CREATE TABLE IF NOT EXISTS policy_state("
             "key TEXT PRIMARY KEY, "
             "day TEXT, "
@@ -73,14 +75,18 @@ class DailyQuotaPolicy:
             "plus_since_last_free INTEGER, "
             "last_post_ts TEXT)"
         )
-        c.execute("SELECT 1 FROM policy_state WHERE key=?", (self.key,))
-        if not c.fetchone():
-            c.execute(
+        cur.execute("SELECT 1 FROM policy_state WHERE key=?", (self.key,))
+        row = cur.fetchone()
+        if row is None:
+            cur.execute(
                 "INSERT INTO policy_state(key, day, free_count, plus_count, plus_since_last_free, last_post_ts) "
                 "VALUES(?,?,?,?,?,?)",
-                (self.key, self._today(), 0, 0, 0, dt.datetime.utcnow().isoformat())
+                (self.key, self._today(), 0, 0, 0, dt.datetime.utcnow().isoformat()),
             )
-        c.commit(); c.close()
+        conn.commit()
+    finally:
+        conn.close()
+
 
     def _today(self) -> str:
         return dt.datetime.utcnow().strftime("%Y-%m-%d")
