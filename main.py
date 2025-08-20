@@ -25,6 +25,11 @@ except Exception:
 # ---- Logging ----
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+# Mute verbose logs from httpx/openai unless explicitly enabled
+if os.getenv("OPENAI_HTTP_LOG", "0") != "1":
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+
 # ====== FastAPI app (chỉ tạo 1 lần) ======
 app = FastAPI()
 
@@ -33,6 +38,10 @@ SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "15"))
 SCAN_TFS = os.getenv("SCAN_TFS", "1H,4H,1D")  # quét 1H/4H/1D
 MAX_GPT = int(os.getenv("MAX_GPT", "10"))
 EXCHANGE = os.getenv("EXCHANGE", "KUCOIN")
+
+# Logging controls
+LOG_VERBOSITY = os.getenv("LOG_VERBOSITY", "normal")  # brief|normal|verbose
+ANALYSIS_MAX_LINES = int(os.getenv("ANALYSIS_MAX_LINES", "8"))
 
 # Telegram (nếu muốn post)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -180,13 +189,49 @@ def scan_once_for_logs():
             side = str(decision.get("side") or "none")
             conf = decision.get("confidence")
 
+            # ---- stdout: ngắn gọn theo LOG_VERBOSITY ----
             if tele:
-                print("[signal]\n" + tele)
+                # tín hiệu ENTER — vẫn in ra, nhưng gọn
+                if LOG_VERBOSITY == "brief":
+                    first_line = tele.splitlines()[0] if tele else f"{sym} | {act}"
+                    print("[signal]", first_line)
+                elif LOG_VERBOSITY == "normal":
+                    # in tiêu đề + 1-2 dòng tiếp theo
+                    lines = tele.splitlines()
+                    head = "\n".join(lines[:min(3, len(lines))])
+                    print("[signal]\n" + head + ("\n..." if len(lines) > 3 else ""))
+                else:
+                    print("[signal]\n" + tele)
             else:
                 print(f"[signal] {sym} | {act} side={side} conf={conf}")
 
-            if out.get("analysis_text"):
-                print("[analysis]\n" + out["analysis_text"])
+            # ---- analysis: ghi đầy đủ vào file; stdout chỉ tóm tắt ----
+            analysis = out.get("analysis_text") or ""
+            if analysis:
+                # ghi bản đầy đủ vào volume
+                try:
+                    os.makedirs("/mnt/data/gpt_logs", exist_ok=True)
+                    ts = int(time.time())
+                    path = f"/mnt/data/gpt_logs/analysis_{sym.replace('/','')}_{ts}.log"
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(analysis)
+                    print(f"[analysis] saved -> {path}")
+                except Exception as e:
+                    print("[analysis] save error:", e)
+
+                # in rút gọn
+                if LOG_VERBOSITY == "brief":
+                    # chỉ in header dòng đầu
+                    header = analysis.splitlines()[0] if analysis else ""
+                    print(header)
+                elif LOG_VERBOSITY == "normal":
+                    lines = analysis.splitlines()
+                    head = "\n".join(lines[:min(ANALYSIS_MAX_LINES, len(lines))])
+                    print(head + ("\n..." if len(lines) > ANALYSIS_MAX_LINES else ""))
+                else:
+                    # verbose
+                    print(analysis)
+
             sent += 1
 
             meta = out.get("meta", {})
