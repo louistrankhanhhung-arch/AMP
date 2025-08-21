@@ -236,9 +236,12 @@ def _df_to_struct(df, tf_label: str) -> Dict[str, Any]:
         # fallback an toàn
         return {"timeframe": tf_label, "rows": []}
 
-def build_messages_classify(struct_4h: Dict[str, Any],
-                            struct_1d: Dict[str, Any],
-                            trigger_1h: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+def build_messages_classify(
+    struct_4h: Dict[str, Any],
+    struct_1d: Dict[str, Any],
+    trigger_1h: Optional[Dict[str, Any]] = None,
+    symbol_hint: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
     Gửi đầy đủ context 1D/4H/1H. Yêu cầu GPT trả về 2 kế hoạch song song.
     """
@@ -248,12 +251,13 @@ def build_messages_classify(struct_4h: Dict[str, Any],
     s1 = _df_to_struct(struct_1d, "1D") if hasattr(struct_1d, "to_dict") else (struct_1d or {})
     sH = _df_to_struct(trigger_1h, "1H") if (trigger_1h is not None and hasattr(trigger_1h, "to_dict")) else (trigger_1h or {})
 
-    ctx = {"struct_4h": s4, "struct_1d": s1, "struct_1h": sH}
+    ctx = {"struct_4h": s4, "struct_1d": s1, "struct_1h": sH, "symbol": symbol_hint,}
 
     # === DEBUG: in & ghi JSON đầu vào GPT khi DEBUG_GPT_INPUT=1 ===
     try:
         sym_for_dump = (
-            _safe(struct_4h, "symbol")
+            symbol_hint
+            or _safe(struct_4h, "symbol")
             or _safe(struct_1d, "symbol")
             or _safe(trigger_1h, "symbol")
             or "SYMBOL"
@@ -291,6 +295,7 @@ def make_telegram_signal(
     s4h: Any,
     s1d: Any,
     trigger_1h: Optional[Any] = None,
+    symbol_hint: Optional[str] = None,
     *args,
     **kwargs,
 ) -> Dict[str, Any]:
@@ -310,7 +315,7 @@ def make_telegram_signal(
     - WAIT/AVOID: chỉ log analysis (gồm trigger_hint nếu WAIT).
     """
     try:
-        msgs = build_messages_classify(struct_4h, struct_1d, trigger_1h=trigger_1h)
+        msgs = build_messages_classify(struct_4h, struct_1d, trigger_1h=trigger_1h, symbol_hint=symbol_hint)
         resp = client.chat.completions.create(
             model=DEFAULT_MODEL,
             messages=msgs,
@@ -323,7 +328,7 @@ def make_telegram_signal(
         if not isinstance(data, dict) or not data:
             return {"ok": False, "error": "GPT không trả JSON hợp lệ", "raw": raw}
 
-        symbol = data.get("symbol") or "SYMBOL"
+        symbol = (symbol_hint or data.get("symbol") or "SYMBOL")
 
         plans = data.get("plans") or {}
         p_intra = plans.get("intraday_1h") or {}
