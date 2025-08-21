@@ -87,12 +87,18 @@ CLASSIFY_SCHEMA = {
 
 # ====== Helpers ======
 def _safe(d: Optional[Dict], *keys, default=None):
-    cur = d or {}
+    # Không dùng `d or {}` vì DataFrame không có truth value
+    cur = d if d is not None else {}
     for k in keys:
         if cur is None:
             return default
-        cur = cur.get(k)
+        # Chỉ đi tiếp nếu là dict-like
+        if hasattr(cur, "get"):
+            cur = cur.get(k)
+        else:
+            return default
     return default if cur is None else cur
+
 
 def _parse_json_from_text(txt: str) -> Dict[str, Any]:
     """
@@ -185,19 +191,35 @@ def _merge_analysis(symbol: str, p1: Optional[Dict[str, Any]], p2: Optional[Dict
     return "\n\n".join(blocks)
 
 # ====== Prompt xây dựng ======
-def build_messages_classify(
-    struct_4h: Dict[str, Any],
-    struct_1d: Dict[str, Any],
-    trigger_1h: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+def _df_to_struct(df, tf_label: str) -> Dict[str, Any]:
+    # cắt gọn để gửi GPT; giữ 200 dòng cuối, reset index
+    try:
+        df2 = df.tail(200).reset_index(drop=True)
+        # ưu tiên các cột phổ biến; nếu thiếu thì cứ để nguyên cột hiện có
+        prefer = [c for c in ["time","open","high","low","close","volume",
+                              "ema20","ema50","ema200","rsi","vwap"] if c in df2.columns]
+        cols = prefer if prefer else list(df2.columns)
+        return {
+            "timeframe": tf_label,
+            "rows": df2[cols].to_dict(orient="records"),
+        }
+    except Exception:
+        # fallback an toàn
+        return {"timeframe": tf_label, "rows": []}
+
+def build_messages_classify(struct_4h: Dict[str, Any],
+                            struct_1d: Dict[str, Any],
+                            trigger_1h: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
     Gửi đầy đủ context 1D/4H/1H. Yêu cầu GPT trả về 2 kế hoạch song song.
     """
-    ctx = {
-        "struct_4h": struct_4h,
-        "struct_1d": struct_1d,
-        "struct_1h": (trigger_1h or {}),
-    }
+
+    # Nếu nhận vào là DataFrame thì chuyển sang struct JSON gọn
+    s4 = _df_to_struct(struct_4h, "4H") if hasattr(struct_4h, "to_dict") else (struct_4h or {})
+    s1 = _df_to_struct(struct_1d, "1D") if hasattr(struct_1d, "to_dict") else (struct_1d or {})
+    sH = _df_to_struct(trigger_1h, "1H") if (trigger_1h is not None and hasattr(trigger_1h, "to_dict")) else (trigger_1h or {})
+
+    ctx = {"struct_4h": s4, "struct_1d": s1, "struct_1h": sH}
 
     # === DEBUG: in & ghi JSON đầu vào GPT khi DEBUG_GPT_INPUT=1 ===
     try:
@@ -272,12 +294,7 @@ def make_telegram_signal(
         if not isinstance(data, dict) or not data:
             return {"ok": False, "error": "GPT không trả JSON hợp lệ", "raw": raw}
 
-        symbol = (
-            data.get("symbol")
-            or _safe(struct_4h, "symbol")
-            or _safe(struct_1d, "symbol")
-            or "SYMBOL"
-        )
+        symbol = data.get("symbol") or "SYMBOL"
 
         plans = data.get("plans") or {}
         p_intra = plans.get("intraday_1h") or {}
