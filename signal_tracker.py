@@ -179,6 +179,7 @@ class SignalTracker:
             }
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False)
+            logging.info(f"[persist] saved {path}")
         except Exception:
             traceback.print_exc()
         try:
