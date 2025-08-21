@@ -8,7 +8,7 @@ import contextlib
 
 from notifier import Notifier, PostRef
 
-import os, json  # thêm
+import os, json, logging  # thêm
 SIGNAL_DIR = os.getenv("SIGNAL_DIR", "/mnt/data/signals")
 os.makedirs(SIGNAL_DIR, exist_ok=True)
 
@@ -169,23 +169,30 @@ class SignalTracker:
         st.current_sl = float(signal.get("stop"))
         self.states[signal_id] = st
         self._by_symbol[st.symbol()] = signal_id
+    
         try:
             path = os.path.join(SIGNAL_DIR, f"{signal_id}.json")
             payload = {
                 "signal_id": signal_id,
                 "created_at": st.created_at,
-                "signal": st.signal,             # {'symbol','side','entries','stop','tps','leverage',...}
+                "signal": st.signal,   # {'symbol','side','entries','stop','tps','leverage',...}
                 "sl_mode": st.sl_mode
             }
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False)
             logging.info(f"[persist] saved {path}")
-        except Exception:
-            traceback.print_exc()
-        try:
-            SignalTracker._prune_signals()
-        except Exception:
-            pass
+    
+            # dọn rác sau khi persist
+            try:
+                SignalTracker._prune_signals()
+            except Exception as e:
+                logging.warning(f"[persist] prune failed: {e}")
+    
+        except Exception as e:
+            # nếu ghi file lỗi, đừng làm crash app; log để điều tra
+            logging.exception(f"[persist] save failed for id={signal_id}: {e}")
+
+        
     
     @staticmethod
     def _prune_signals(max_files: int = 2000):
