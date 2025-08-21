@@ -175,7 +175,7 @@ def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
 
 
 # ====== GPT call với exponential backoff ======
-def _call_gpt_with_backoff(s4h, s1d, s1h):
+def _call_gpt_with_backoff(s4h, s1d, s1h, symbol_hint=None):
     # Guard: dữ liệu thiếu/rỗng thì bỏ sớm, tránh dùng DF trong điều kiện
     if not (_df_ok(s4h) and _df_ok(s1d) and _df_ok(s1h)):
         return {"ok": False, "error": "missing/empty frame(s)"}
@@ -183,7 +183,7 @@ def _call_gpt_with_backoff(s4h, s1d, s1h):
     last_exc = None
     for _ in range(GPT_MAX_RETRIES + 1):
         try:
-            return make_telegram_signal(s4h, s1d, trigger_1h=s1h)
+            return make_telegram_signal(s4h, s1d, trigger_1h=s1h, symbol_hint=symbol_hint)
         except Exception as e:
             last_exc = e
             msg = str(e)
@@ -235,7 +235,7 @@ def scan_once_for_logs():
             decision = {}
             
             try:
-                out = _call_gpt_with_backoff(s4h, s1d, s1h)
+                out = _call_gpt_with_backoff(s4h, s1d, s1h, symbol_hint=sym)
                 time.sleep(RATE_SLEEP_SECS)  # spacing hạ RPM
                 # >>> Guard: GPT trả về không hợp lệ thì bỏ qua mã này
                 if not out.get("ok"):
@@ -496,7 +496,7 @@ def api_scan_once(req: ScanOnceReq):
                 print(f"[scan] missing structs: {sym} (missing {','.join(missing_tfs)})")
                 continue
 
-            out = _call_gpt_with_backoff(s4h, s1d, s1h)
+            out = _call_gpt_with_backoff(s4h, s1d, s1h, symbol_hint=sym)
             print(json.dumps(out, ensure_ascii=False))
         return {"ok": True, "count": len(req.symbols)}
     scan_once_for_logs()
