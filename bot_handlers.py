@@ -34,7 +34,7 @@ def _is_admin(user_id: int) -> bool:
     return user_id in _admin_ids()
 
 def _gen_order_code(uid: int) -> str:
-    # Ví dụ: ORD-YYMMDD-HHMM-<2 ký tự ngẫu nhiên>
+    # Ví dụ: ORD-YYMMDD-<2 ký tự ngẫu nhiên>
     ts = datetime.now(timezone.utc).strftime("%y%m%d-%H%M")
     rand = ''.join(random.choices(string.ascii_uppercase + string.digits, k=2))
     return f"ORD-{ts}-{rand}"
@@ -49,13 +49,28 @@ def _render_paywall_html(user_id: int, order_code: str) -> str:
         "• <b>Chủ tài khoản:</b> Trần Khánh Hưng\n\n"
         "<b>2) Nội dung chuyển khoản</b>\n"
         f"<code>{order_code} {user_id}</code>\n"
-        "Ví dụ: <code>ORD-250820-AB12 123456789</code>\n\n"
+        "Ví dụ: <code>ORD-250820-12 123456789</code>\n\n"
         "<b>3) Xác nhận</b>\n"
         "• Sau khi chuyển khoản, bấm nút <b>“✅ Đã chuyển tiền”</b> bên dưới để báo admin.\n"
         "• Admin sẽ kích hoạt trong thời gian sớm nhất.\n\n"
         "<i>Lưu ý:</i>\n"
         "• Ghi đúng nội dung chuyển khoản để hệ thống so khớp nhanh.\n"
         "• Nếu sai nội dung, có thể cần bạn gửi ảnh biên lai khi admin yêu cầu.\n"
+    )
+
+def _send_paywall(bot: TeleBot, chat_id: int | str, user_id: int):
+    order_code = _gen_order_code(user_id)
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton(
+        "✅ Đã chuyển tiền",
+        callback_data=f"PAID_CONFIRMED:{user_id}:{order_code}"
+    ))
+    bot.send_message(
+        chat_id,
+        _render_paywall_html(user_id, order_code),
+        parse_mode='HTML',
+        reply_markup=kb,
+        disable_web_page_preview=True
     )
 
 def _plus_link(bot: TeleBot) -> str:
@@ -89,20 +104,7 @@ def register_handlers(bot: TeleBot):
 
         # 1) Deeplink UPGRADE -> tạo mã order + gửi Paywall + nút "Đã chuyển tiền"
         if token == "UPGRADE":
-            order_code = _gen_order_code(m.from_user.id)
-            kb = types.InlineKeyboardMarkup()
-            # Pass cả user_id & order_code cho callback
-            kb.add(types.InlineKeyboardButton(
-                "✅ Đã chuyển tiền",
-                callback_data=f"PAID_CONFIRMED:{m.from_user.id}:{order_code}"
-            ))
-            bot.send_message(
-                m.chat.id,
-                _render_paywall_html(m.from_user.id, order_code),
-                parse_mode='HTML',
-                reply_markup=kb,
-                disable_web_page_preview=True
-            )
+            _send_paywall(bot, m.chat.id, m.from_user.id)
             return
 
         # 2) Deeplink SIG_<id> -> unlock nếu có Plus, ngược lại gửi teaser + link nâng cấp
@@ -128,9 +130,13 @@ def register_handlers(bot: TeleBot):
                     logging.exception(f"render_full_signal_by_id error: {e}")
                     bot.send_message(m.chat.id, "Xin lỗi, không tìm thấy signal hoặc xảy ra lỗi khi tải.")
             else:
-                # Chưa Plus: gửi teaser (nếu có), kèm nút nâng cấp
+                # Chưa Plus: gửi teaser + nút nâng cấp
                 kb = types.InlineKeyboardMarkup()
-                kb.add(types.InlineKeyboardButton("✨ Nâng cấp/Gia hạn Plus", url=_plus_link(bot)))
+                if m.chat.type == 'private':
+                    kb.add(types.InlineKeyboardButton("✨ Nâng cấp/Gia hạn Plus", callback_data="OPEN_PAYWALL"))
+                else:
+                    kb.add(types.InlineKeyboardButton("✨ Nâng cấp/Gia hạn Plus", url=_plus_link(bot)))
+                # ... send_message(..., reply_markup=kb)
                 teaser = None
                 if summarize_signal:
                     try:
@@ -159,6 +165,11 @@ def register_handlers(bot: TeleBot):
     @bot.message_handler(commands=['status'])
     def on_status(m):
         bot.send_message(m.chat.id, _format_status(m.from_user.id), parse_mode='HTML')
+        
+    # /upgrade — mở Paywall trong DM
+    @bot.message_handler(commands=['upgrade'])
+    def on_upgrade(m):
+        _send_paywall(bot, m.chat.id, m.from_user.id)
 
     # /plus_link — gửi link nâng cấp/gia hạn (DM)
     @bot.message_handler(commands=['plus_link'])
@@ -198,6 +209,12 @@ def register_handlers(bot: TeleBot):
         except Exception as e:
             bot.reply_to(m, f"❌ Sai cú pháp. Dùng: /remove <user_id>\nErr: {e}")
 
+    # Callback: "OPEN_PAYWALL" -> mở Paywall trong DM
+    @bot.callback_query_handler(func=lambda c: c.data == "OPEN_PAYWALL")
+    def on_open_paywall(call):
+        _send_paywall(bot, call.message.chat.id, call.from_user.id)
+        bot.answer_callback_query(call.id)
+
     # Callback: “Đã chuyển tiền”
     @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("PAID_CONFIRMED"))
     def on_paid_confirmed(call):
@@ -211,12 +228,16 @@ def register_handlers(bot: TeleBot):
 
         bot.answer_callback_query(call.id, "Cảm ơn! Admin sẽ kích hoạt sớm.")
         # Báo cho admin
+        u = call.from_user
+        name = (u.first_name or "") + (" " + u.last_name if u.last_name else "")
+        uname = f"@{u.username}" if u.username else "(no username)"
         text = (
             "💳 <b>Yêu cầu kích hoạt Plus</b>\n"
-            f"• user_id: <code>{paid_uid}</code>\n"
+            f"• user_id: <code>{paid_uid}</code> {uname} {name}\n"
             f"• order_code: <code>{paid_order}</code>\n"
-            "• Lệnh gợi ý: <code>/plus_add {uid} 30</code>\n".format(uid=paid_uid)
+            f"• Lệnh gợi ý: <code>/plus_add {paid_uid} 30</code>\n"
         )
+
         for aid in _admin_ids():
             try:
                 bot.send_message(aid, text, parse_mode='HTML')
