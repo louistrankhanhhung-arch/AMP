@@ -49,7 +49,6 @@ def _render_paywall_html(user_id: int, order_code: str) -> str:
         "• <b>Chủ tài khoản:</b> Trần Khánh Hưng\n\n"
         "<b>2) Nội dung chuyển khoản</b>\n"
         f"<code>{order_code} {user_id}</code>\n"
-        "Ví dụ: <code>ORD-250820-12 123456789</code>\n\n"
         "<b>3) Xác nhận</b>\n"
         "• Sau khi chuyển khoản, bấm nút <b>“✅ Đã chuyển tiền”</b> bên dưới để báo admin.\n"
         "• Admin sẽ kích hoạt trong thời gian sớm nhất.\n\n"
