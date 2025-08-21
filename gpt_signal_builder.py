@@ -268,19 +268,40 @@ def build_messages_classify(
         pass
 
     system = {
-        "role": "system",
-        "content": (
-            "Bạn là trader kỹ thuật. Với JSON 3 khung **1D / 4H / 1H**, hãy trả về **2 kế hoạch độc lập**:\n"
-            "1) intraday_1h: setup theo 1H (lướt sóng ngắn).\n"
-            "2) swing_4h: setup theo 4H (đồng pha 1D, giữ lệnh dài hơn).\n\n"
-            "Tiêu chuẩn:\n"
-            "- Intraday (1H): chấp nhận RSI quá mua/bán nếu có xác nhận volume; yêu cầu R:R ≥ 1.5; ưu tiên reclaim/retest/mini-breakout; SL chặt; vị thế ≤ 0.3–0.5R.\n"
-            "- Swing (4H): 4H phải đồng pha với 1D; tránh trade ngược xu hướng lớn; yêu cầu R:R ≥ 2.0; vị thế 1.0R chuẩn.\n"
-            "Nếu WAIT: thêm trigger_hint (điểm hoặc kịch bản cụ thể). Nếu AVOID: ghi lý do ngắn gọn.\n"
-            "Trả về JSON đúng theo schema sau (tiếng Việt, KHÔNG thêm văn bản ngoài JSON):\n"
-            + json.dumps(CLASSIFY_SCHEMA, ensure_ascii=False)
+    "role": "system",
+    "content": (
+        # ==== ENTRY PROXIMITY GATE (BẮT BUỘC) ====
+        "[ENTRY PROXIMITY GATE — BẮT BUỘC]\n"
+        "- current_price = giá đóng nến gần nhất của khung 1H trong dữ liệu đầu vào.\n"
+        "- entries = mảng mức vào lệnh đề xuất. Định nghĩa vùng: lo = min(entries), hi = max(entries). "
+        "Nếu chỉ có 1 mức thì coi lo = hi.\n"
+        "- tolerance (nới): tol = max(0.005 * current_price, 0.15 * ATR_1H). "
+        "Nếu JSON không có ATR_1H thì coi ATR_1H = 0 (tức tol = 0.005 * current_price).\n"
+        "- Áp dụng CHO TỪNG kế hoạch (intraday_1h và swing_4h):\n"
+        "    * Chỉ được trả action = \"ENTER\" nếu current_price ∈ [lo - tol, hi + tol]. "
+        "(tức là giá đang ở ngay/sát vùng entry, có thể vào ngay).\n"
+        "    * Nếu nằm ngoài khoảng trên ⇒ action = \"WAIT\" và BẮT BUỘC có trigger_hint "
+        "(điểm/kịch bản cụ thể, ví dụ: 'retest 3.20±tol', hoặc 'close 1H > 3.20 với volume > SMA20').\n"
+        "    * Không đuổi giá: nếu Long và current_price > hi + tol (hoặc Short và current_price < lo - tol) ⇒ WAIT.\n"
+        "    * Với strategy \"breakout\"/\"reclaim\": trigger_hint nên là điều kiện đóng nến vượt biên + xác nhận volume.\n"
+        "      Với \"retest\"/\"pullback\": trigger_hint là chạm lại zone lo–hi (có thể ghi biên ±tol).\n"
+        "    * Nếu entries rỗng/không hợp lệ ⇒ luôn WAIT và nêu rõ trigger_hint.\n"
+        "- Giữ nguyên schema output; KHÔNG thêm văn bản ngoài JSON. Nếu WAIT thì plan.trigger_hint là bắt buộc.\n"
+        "\n"
+        # ==== NỘI DUNG HỆ THỐNG CHÍNH ====
+        "Bạn là trader kỹ thuật. Với JSON 3 khung **1D / 4H / 1H**, hãy trả về **2 kế hoạch độc lập**:\n"
+        "1) intraday_1h: setup theo 1H (lướt sóng ngắn).\n"
+        "2) swing_4h: setup theo 4H (đồng pha 1D, giữ lệnh dài hơn).\n\n"
+        "Tiêu chuẩn:\n"
+        "- Intraday (1H): chấp nhận RSI quá mua/bán nếu có xác nhận volume; yêu cầu R:R ≥ 1.5; "
+        "ưu tiên reclaim/retest/mini-breakout; SL chặt; vị thế ≤ 0.3–0.5R.\n"
+        "- Swing (4H): 4H phải đồng pha với 1D; tránh trade ngược xu hướng lớn; yêu cầu R:R ≥ 2.0; vị thế 1.0R chuẩn.\n"
+        "Nếu WAIT: thêm trigger_hint (điểm hoặc kịch bản cụ thể). Nếu AVOID: ghi lý do ngắn gọn.\n"
+        "Trả về JSON đúng theo schema sau (tiếng Việt, KHÔNG thêm văn bản ngoài JSON):\n"
+        + json.dumps(CLASSIFY_SCHEMA, ensure_ascii=False)
         ),
     }
+    
     user = {
         "role": "user",
         "content": [
@@ -288,7 +309,7 @@ def build_messages_classify(
             {"type": "text", "text": json.dumps(ctx, ensure_ascii=False)},
         ],
     }
-    return [system, user]
+
 
 # ====== Hàm chính ======
 def make_telegram_signal(
