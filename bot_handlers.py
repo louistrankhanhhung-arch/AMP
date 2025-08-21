@@ -16,7 +16,7 @@ from membership import (
 )
 
 # Nội dung signal để mở khóa trong DM
-from signal_tracker import render_full_signal_by_id
+from signal_tracker import render_full_signal_by_id, SIGNAL_DIR
 # Tóm tắt/teaser khi user chưa Plus (tùy chọn, nếu không có sẽ fallback)
 try:
     from performance_logger import summarize_signal
@@ -120,6 +120,9 @@ def register_handlers(bot: TeleBot):
                 return
 
             if has_plus(m.from_user.id):
+                path = os.path.join(SIGNAL_DIR, f"{sig_id}.json")
+                logging.info(f"[dm] open SIG id={sig_id} file={path} exists={os.path.isfile(path)}")
+
                 try:
                     html = render_full_signal_by_id(sig_id)
                     if not html:
