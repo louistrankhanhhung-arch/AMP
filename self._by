@@ -3,10 +3,14 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Set, Any
 from dataclasses import dataclass, field
 from datetime import datetime
-import math
 import traceback
+import contextlib
 
 from notifier import Notifier, PostRef
+
+import os, json  # thêm
+SIGNAL_DIR = os.getenv("SIGNAL_DIR", "/mnt/data/signals")
+os.makedirs(SIGNAL_DIR, exist_ok=True)
 
 # (tuỳ chọn) ghi log khi kèo đóng
 try:
@@ -60,14 +64,18 @@ def _render_full_html_from_signal(sig: Dict[str, Any]) -> str:
 _LAST_TRACKER: Optional["SignalTracker"] = None
 
 def render_full_signal_by_id(signal_id: str) -> Optional[str]:
-    """
-    Trả về HTML full signal để dùng trong DM, dựa trên state đang lưu
-    trong SignalTracker hiện tại (_LAST_TRACKER).
-    """
     st = _LAST_TRACKER.get_state(signal_id) if _LAST_TRACKER else None
-    if not st:
+    if st:
+        return _render_full_html_from_signal(st.signal)
+
+    # Fallback từ file
+    path = os.path.join(SIGNAL_DIR, f"{signal_id}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return _render_full_html_from_signal(data["signal"] if "signal" in data else data)
+    except Exception:
         return None
-    return _render_full_html_from_signal(st.signal)
 
 
 @dataclass
@@ -161,6 +169,33 @@ class SignalTracker:
         st.current_sl = float(signal.get("stop"))
         self.states[signal_id] = st
         self._by_symbol[st.symbol()] = signal_id
+        try:
+            path = os.path.join(SIGNAL_DIR, f"{signal_id}.json")
+            payload = {
+                "signal_id": signal_id,
+                "created_at": st.created_at,
+                "signal": st.signal,             # {'symbol','side','entries','stop','tps','leverage',...}
+                "sl_mode": st.sl_mode
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        except Exception:
+            traceback.print_exc()
+        try:
+            SignalTracker._prune_signals()
+        except Exception:
+            pass
+    
+    @staticmethod
+    def _prune_signals(max_files: int = 2000):
+        files = sorted(
+            [os.path.join(SIGNAL_DIR, f) for f in os.listdir(SIGNAL_DIR) if f.endswith(".json")],
+            key=os.path.getmtime, reverse=True
+        )
+        for p in files[max_files:]:
+            with contextlib.suppress(Exception):
+                os.remove(p)
+
 
     def get_state(self, signal_id: str) -> Optional[SignalState]:
         return self.states.get(signal_id)
