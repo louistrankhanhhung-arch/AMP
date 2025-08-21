@@ -166,6 +166,7 @@ def _fmt_list(nums):
     except Exception:
         return ", ".join(str(x) for x in nums)
 
+
 def _render_simple_signal(symbol: str, decision: Dict[str, Any], label: str | None = None) -> str:
     """
     Format Telegram *chỉ dùng khi ENTER* (đơn giản, không [signal], không Leverage):
@@ -175,12 +176,12 @@ def _render_simple_signal(symbol: str, decision: Dict[str, Any], label: str | No
     Entry: ...
     Stop: ...
     TP: ...
-
+    
     Strategy: ...
     """
     side = (decision.get("side") or "long").lower()
     direction = "LONG" if side == "long" else "SHORT"
-    # Giữ symbol có "/" nếu đã có; nếu không, chèn "/USDT" khi phù hợp
+    # giữ nguyên symbol dạng có "/" nếu đã có; nếu không, thử chèn "/USDT" khi phù hợp
     sym = symbol if "/" in symbol else (symbol[:-4] + "/USDT" if symbol.endswith("USDT") and len(symbol) > 4 else symbol)
 
     entries = decision.get("entries") or decision.get("entry") or []
@@ -206,7 +207,6 @@ def _render_simple_signal(symbol: str, decision: Dict[str, Any], label: str | No
     lines.append("")
     lines.append(f"Strategy: {strategy}")
     return "\n".join(lines)
-
 def _analysis_lines(symbol: str, decision: Dict[str, Any], tag: str) -> List[str]:
     act = (decision.get("decision") or decision.get("action") or "").upper()
     side = (decision.get("side") or "long").lower()
@@ -257,14 +257,22 @@ def build_messages_classify(
 ) -> List[Dict[str, Any]]:
     """
     Gửi đầy đủ context 1D/4H/1H. Yêu cầu GPT trả về 2 kế hoạch song song.
+    ĐÃ THÊM ENTRY PROXIMITY GATE với tol = max(0.005 * current_price, 0.15 * ATR_1H).
+    Bảo đảm tương thích /v1/chat/completions: messages là LIST và content là STRING.
     """
+    # Helper an toàn cho json.dumps (tránh lỗi numpy/timestamp)
+    def _safe_dumps_local(obj):
+        try:
+            return json.dumps(obj, ensure_ascii=False, allow_nan=False, default=str)
+        except Exception:
+            return json.dumps(str(obj), ensure_ascii=False)
 
     # Nếu nhận vào là DataFrame thì chuyển sang struct JSON gọn
     s4 = _df_to_struct(struct_4h, "4H") if hasattr(struct_4h, "to_dict") else (struct_4h or {})
     s1 = _df_to_struct(struct_1d, "1D") if hasattr(struct_1d, "to_dict") else (struct_1d or {})
     sH = _df_to_struct(trigger_1h, "1H") if (trigger_1h is not None and hasattr(trigger_1h, "to_dict")) else (trigger_1h or {})
 
-    ctx = {"struct_4h": s4, "struct_1d": s1, "struct_1h": sH, "symbol": symbol_hint,}
+    ctx = {"struct_4h": s4, "struct_1d": s1, "struct_1h": sH, "symbol": symbol_hint}
 
     # === DEBUG: in & ghi JSON đầu vào GPT khi DEBUG_GPT_INPUT=1 ===
     try:
@@ -275,56 +283,64 @@ def build_messages_classify(
             or _safe(trigger_1h, "symbol")
             or "SYMBOL"
         )
-        debug_print_gpt_input(ctx)                  # in ra log
+        debug_print_gpt_input(ctx)                   # in ra log
         debug_dump_gpt_input(sym_for_dump, ctx, tag="ctx")  # ghi file (nếu bật)
     except Exception:
         pass
 
-    system = {
-    "role": "system",
-    "content": (
-        # ==== ENTRY PROXIMITY GATE (BẮT BUỘC) ====
-        "[ENTRY PROXIMITY GATE — BẮT BUỘC]\n"
-        "- current_price = giá đóng nến gần nhất của khung 1H trong dữ liệu đầu vào.\n"
+    # ====== SYSTEM TEXT with ENTRY PROXIMITY GATE (NỚI) ======
+    # Lấy schema text an toàn
+    try:
+        schema_text = _safe_dumps_local(CLASSIFY_SCHEMA)
+    except Exception:
+        schema_text = _safe_dumps_local({"note": "CLASSIFY_SCHEMA unavailable"})
+
+    system_text = (
+        "[ENTRY PROXIMITY GATE — BẮT BUỘC]\\n"
+        "- current_price = giá đóng nến gần nhất của khung 1H trong dữ liệu đầu vào.\\n"
         "- entries = mảng mức vào lệnh đề xuất. Định nghĩa vùng: lo = min(entries), hi = max(entries). "
-        "Nếu chỉ có 1 mức thì coi lo = hi.\n"
+        "Nếu chỉ có 1 mức thì coi lo = hi.\\n"
         "- tolerance (nới): tol = max(0.005 * current_price, 0.15 * ATR_1H). "
-        "Nếu JSON không có ATR_1H thì coi ATR_1H = 0 (tức tol = 0.005 * current_price).\n"
-        "- Áp dụng CHO TỪNG kế hoạch (intraday_1h và swing_4h):\n"
-        "    * Chỉ được trả action = \"ENTER\" nếu current_price ∈ [lo - tol, hi + tol]. "
-        "(tức là giá đang ở ngay/sát vùng entry, có thể vào ngay).\n"
-        "    * Nếu nằm ngoài khoảng trên ⇒ action = \"WAIT\" và BẮT BUỘC có trigger_hint "
-        "(điểm/kịch bản cụ thể, ví dụ: 'retest 3.20±tol', hoặc 'close 1H > 3.20 với volume > SMA20').\n"
-        "    * Không đuổi giá: nếu Long và current_price > hi + tol (hoặc Short và current_price < lo - tol) ⇒ WAIT.\n"
-        "    * Với strategy \"breakout\"/\"reclaim\": trigger_hint nên là điều kiện đóng nến vượt biên + xác nhận volume.\n"
-        "      Với \"retest\"/\"pullback\": trigger_hint là chạm lại zone lo–hi (có thể ghi biên ±tol).\n"
-        "    * Nếu entries rỗng/không hợp lệ ⇒ luôn WAIT và nêu rõ trigger_hint.\n"
-        "- Giữ nguyên schema output; KHÔNG thêm văn bản ngoài JSON. Nếu WAIT thì plan.trigger_hint là bắt buộc.\n"
-        "\n"
-        # ==== NỘI DUNG HỆ THỐNG CHÍNH ====
-        "Bạn là trader kỹ thuật. Với JSON 3 khung **1D / 4H / 1H**, hãy trả về **2 kế hoạch độc lập**:\n"
-        "1) intraday_1h: setup theo 1H (lướt sóng ngắn).\n"
-        "2) swing_4h: setup theo 4H (đồng pha 1D, giữ lệnh dài hơn).\n\n"
-        "Tiêu chuẩn:\n"
+        "Nếu JSON không có ATR_1H thì coi ATR_1H = 0 (tức tol = 0.005 * current_price).\\n"
+        "- Áp dụng CHO TỪNG kế hoạch (intraday_1h và swing_4h):\\n"
+        "    * Chỉ được trả action = \\\"ENTER\\\" nếu current_price ∈ [lo - tol, hi + tol]. "
+        "(tức giá đang ở ngay/sát vùng entry, có thể vào ngay).\\n"
+        "    * Nếu nằm ngoài khoảng trên ⇒ action = \\\"WAIT\\\" và BẮT BUỘC có trigger_hint "
+        "(điểm/kịch bản cụ thể, ví dụ: 'retest biên lo–hi ± tol' hoặc 'close 1H > ngưỡng breakout + volume > SMA20').\\n"
+        "    * Không đuổi giá: nếu Long và current_price > hi + tol (hoặc Short và current_price < lo - tol) ⇒ WAIT.\\n"
+        "    * Với strategy \\\"breakout\\\"/\\\"reclaim\\\": trigger_hint = điều kiện đóng nến vượt biên + xác nhận volume.\\n"
+        "      Với \\\"retest\\\"/\\\"pullback\\\": trigger_hint = chạm lại zone lo–hi (có thể ghi biên ±tol).\\n"
+        "    * Nếu entries rỗng/không hợp lệ ⇒ luôn WAIT và nêu rõ trigger_hint.\\n"
+        "- Output chỉ JSON đúng schema; KHÔNG thêm văn bản ngoài JSON.\\n"
+        "\\n"
+        "Bạn là trader kỹ thuật. Với JSON 3 khung **1D / 4H / 1H**, hãy trả về **2 kế hoạch độc lập**:\\n"
+        "1) intraday_1h: setup theo 1H (lướt sóng ngắn).\\n"
+        "2) swing_4h: setup theo 4H (đồng pha 1D, giữ lệnh dài hơn).\\n\\n"
+        "Tiêu chuẩn:\\n"
         "- Intraday (1H): chấp nhận RSI quá mua/bán nếu có xác nhận volume; yêu cầu R:R ≥ 1.5; "
-        "ưu tiên reclaim/retest/mini-breakout; SL chặt; vị thế ≤ 0.3–0.5R.\n"
-        "- Swing (4H): 4H phải đồng pha với 1D; tránh trade ngược xu hướng lớn; yêu cầu R:R ≥ 2.0; vị thế 1.0R chuẩn.\n"
-        "Nếu WAIT: thêm trigger_hint (điểm hoặc kịch bản cụ thể). Nếu AVOID: ghi lý do ngắn gọn.\n"
-        "Trả về JSON đúng theo schema sau (tiếng Việt, KHÔNG thêm văn bản ngoài JSON):\n"
-        + json.dumps(CLASSIFY_SCHEMA, ensure_ascii=False)
-        ),
-    }
-    
-    user = {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": "Context JSON (1D/4H/1H):"},
-            {"type": "text", "text": json.dumps(ctx, ensure_ascii=False)},
-        ],
-    }
+        "ưu tiên reclaim/retest/mini-breakout; SL chặt; vị thế ≤ 0.3–0.5R.\\n"
+        "- Swing (4H): 4H phải đồng pha với 1D; tránh trade ngược xu hướng lớn; yêu cầu R:R ≥ 2.0; vị thế 1.0R chuẩn.\\n"
+        "Nếu WAIT: thêm trigger_hint (điểm hoặc kịch bản cụ thể). Nếu AVOID: ghi lý do ngắn gọn.\\n"
+        "Trả về JSON đúng theo schema sau (tiếng Việt, KHÔNG thêm văn bản ngoài JSON):\\n"
+        f"{schema_text}"
+    )
 
+    system = {"role": "system", "content": system_text}
 
-# ====== Hàm chính ======
+    # Với /v1/chat/completions, content của user nên là STRING (không phải list part)
+    user_text = "Context JSON (1D/4H/1H):\\n" + _safe_dumps_local(ctx)
+    user = {"role": "user", "content": user_text}
+
+    messages = [system, user]
+
+    # Guard cuối: đảm bảo đúng định dạng
+    if not isinstance(messages, list) or not messages or not all(isinstance(m, dict) for m in messages):
+        raise ValueError("build_messages_classify produced invalid messages")
+    if not isinstance(system.get("content"), str) or not isinstance(user.get("content"), str):
+        raise ValueError("message content must be string for /v1/chat/completions")
+
+    return messages
+
 def make_telegram_signal(
     s4h: Any,
     s1d: Any,
