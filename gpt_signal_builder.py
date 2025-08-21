@@ -168,31 +168,44 @@ def _fmt_list(nums):
 
 def _render_simple_signal(symbol: str, decision: Dict[str, Any], label: str | None = None) -> str:
     """
-    Format Telegram *chỉ dùng khi ENTER*:
-    {Direction} | {Mã} (LABEL)
-    Leverage:
-    Entry:
-    SL:
-    TP:
+    Format Telegram *chỉ dùng khi ENTER* (đơn giản, không [signal], không Leverage):
+    {DIRECTION} | {SYMBOL}
+    {LABEL}
+
+    Entry: ...
+    Stop: ...
+    TP: ...
+
+    Strategy: ...
     """
     side = (decision.get("side") or "long").lower()
-    direction = "Long" if side == "long" else "Short"
+    direction = "LONG" if side == "long" else "SHORT"
+    # Giữ symbol có "/" nếu đã có; nếu không, chèn "/USDT" khi phù hợp
+    sym = symbol if "/" in symbol else (symbol[:-4] + "/USDT" if symbol.endswith("USDT") and len(symbol) > 4 else symbol)
+
     entries = decision.get("entries") or decision.get("entry") or []
     tps = decision.get("tps") or decision.get("tp") or []
     sl = decision.get("sl")
-    leverage = decision.get("leverage")
+    strategy = decision.get("strategy") or "-"
 
-    hdr = f"{direction} | {symbol.replace('/', '')}"
+    def _fmt_list_simple(nums):
+        if not nums:
+            return "-"
+        try:
+            return ", ".join(f"{float(x):g}" for x in nums)
+        except Exception:
+            return ", ".join(str(x) for x in nums)
+
+    lines = [f"{direction} | {sym}"]
     if label:
-        hdr += f" ({label})"
-
-    return "\n".join([
-        hdr,
-        f"Leverage: {leverage if leverage is not None else '-'}",
-        f"Entry: {_fmt_list(entries)}",
-        f"SL: {('-' if sl is None else (f'{float(sl):.6f}' if isinstance(sl,(int,float,str)) else str(sl)))}",
-        f"TP: {_fmt_list(tps)}",
-    ])
+        lines.append(str(label).upper())
+    lines.append("")
+    lines.append(f"Entry: {_fmt_list_simple(entries)}")
+    lines.append(f"Stop: {('-' if sl is None else (f'{float(sl):g}' if isinstance(sl,(int,float,str)) else str(sl)))}")
+    lines.append(f"TP: {_fmt_list_simple(tps)}")
+    lines.append("")
+    lines.append(f"Strategy: {strategy}")
+    return "\n".join(lines)
 
 def _analysis_lines(symbol: str, decision: Dict[str, Any], tag: str) -> List[str]:
     act = (decision.get("decision") or decision.get("action") or "").upper()
