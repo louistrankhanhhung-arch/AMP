@@ -74,6 +74,20 @@ def wire_handlers_once(bot):
         register_handlers(bot)
         _HANDLERS_WIRED = True
         
+# --- thêm ở gần chỗ wire_handlers_once ---
+def _start_bot_polling(bot):
+    import threading, logging
+    def _run():
+        try:
+            # chỉ nhận message & callback_query cho nhẹ
+            bot.infinity_polling(skip_pending=True, allowed_updates=["message","callback_query"])
+        except Exception as e:
+            logging.exception(f"[telegram] polling stopped: {e}")
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    logging.info("[telegram] polling thread started")
+    return t
+    
 app = FastAPI()
 
 _BOT: Any | None = None
@@ -468,6 +482,10 @@ def _on_startup():
     t.start()
     app.state.scan_thread = t
     logging.info("[scheduler] thread spawned")
+
+    if _BOT:
+        _start_bot_polling(_BOT)   # <- chuyển vào đây để đảm bảo chỉ start một lần
+        logging.info("[telegram] polling thread started")
 
 
 # ====== API ======
