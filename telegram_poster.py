@@ -159,35 +159,53 @@ def _fmt_price(x: float) -> str:
     s = f"{x:.8f}".rstrip('0').rstrip('.')
     return s if s else "0"
 
+def _display_symbol(sym: str) -> str:
+    if "/" in sym:
+        return sym
+    # thêm "/" cho các hậu tố phổ biến
+    suffixes = ["USDT","USDC","USD","FDUSD","TUSD","BUSD","BTC","ETH"]
+    for q in suffixes:
+        if sym.endswith(q) and len(sym) > len(q):
+            return f"{sym[:-len(q)]}/{q}"
+    return sym
+
 def _label_from_tf(tf: str) -> str:
     tfu = (tf or "").upper()
     intradays = {"5M", "15M", "30M", "45M", "1H", "2H"}
     return "INTRADAY" if tfu in intradays else "SWING"
 
 def render_full(sig: Signal) -> str:
-    tps = "\n".join(f"<b>TP{i+1}:</b> {_fmt_price(p)}" for i, p in enumerate(sig.tps))
-    lev = f"\n<b>Leverage:</b> x{sig.leverage}" if sig.leverage else ""
-    eta = f"\n<b>ETA:</b> {sig.eta}" if sig.eta else ""
     label = _label_from_tf(sig.timeframe)
-    entry_txt = _fmt_price(sig.entries[0]) if (sig.entries and len(sig.entries) > 0) else "-"
-    return (
-        f"<b>#{sig.symbol}</b> — <b>{sig.side.upper()}</b> {sig.timeframe} ({label})\n"
-        f"<b>Entry:</b> {entry_txt}\n"
-        f"<b>SL:</b> {_fmt_price(sig.sl)}\n"
-        f"{tps}{lev}{eta}"
-    )
+    sym = _display_symbol(sig.symbol)
+    tps_txt = ", ".join(_fmt_price(p) for p in (sig.tps or [])) if sig.tps else "-"
+    entries_txt = ", ".join(_fmt_price(p) for p in (sig.entries or [])) if sig.entries else "-"
+
+    lines = [
+        f"{sig.side.upper()} | {sym}",
+        label,
+        "",
+        f"Entry: {entries_txt}",
+        f"Stop: {_fmt_price(sig.sl)}",
+        f"TP: {tps_txt}",
+        "",
+        f"Strategy: {sig.strategy or '-'}",
+    ]
+    return "\n".join(lines)
+
 
 def render_teaser(sig: Signal) -> str:
     lock = "🔒"
-    tps_lock = lock
     label = _label_from_tf(sig.timeframe)
+    sym = _display_symbol(sig.symbol)
     return (
-        f"<b>{sig.symbol} {sig.timeframe} ({label})</b>\n"
-        f"Setup: {sig.strategy}\n"
-        f"Entry: <tg-spoiler>{lock}</tg-spoiler> | "
-        f"SL: <tg-spoiler>{lock}</tg-spoiler> | "
-        f"TP: <tg-spoiler>{tps_lock}</tg-spoiler>"
+        f"{sig.side.upper()} | {sym}\n"
+        f"{label}\n\n"
+        f"Entry: <tg-spoiler>{lock}</tg-spoiler>\n"
+        f"Stop:  <tg-spoiler>{lock}</tg-spoiler>\n"
+        f"TP:    <tg-spoiler>{lock}</tg-spoiler>\n\n"
+        f"Strategy: {sig.strategy or '-'}"
     )
+
 
 
 # ======================
