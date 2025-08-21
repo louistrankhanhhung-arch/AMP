@@ -15,42 +15,71 @@ def _last(df, col):
     return float(df[col].iloc[-1])
 
 
-# ==== Debug helpers (from performance_logger) ====
-# Bật bằng ENV: DEBUG_GPT_INPUT=1 (và tuỳ chọn DEBUG_GPT_DIR)
-try:
-    from performance_logger import debug_dump_gpt_input, debug_print_gpt_input  # type: ignore
-except Exception:
-    # ---- Fallback: tự in/ghi file nếu thiếu helper ----
-    def _debug_enabled() -> bool:
-        return os.getenv("DEBUG_GPT_INPUT", "0") == "1"
+# ==== Debug helpers (standalone fallback) ====
+# Mức debug:
+#   DEBUG_GPT_INPUT=0  -> tắt hết
+#   DEBUG_GPT_INPUT=1  -> in SLIM (không raw rows) + ghi file đầy đủ
+#   DEBUG_GPT_INPUT=2  -> in FULL (có rows) + ghi file đầy đủ
+def _debug_level() -> int:
+    try:
+        return int(os.getenv("DEBUG_GPT_INPUT", "0") or "0")
+    except Exception:
+        return 0
 
-    def debug_print_gpt_input(ctx: Dict[str, Any]) -> None:
-        if not _debug_enabled():
-            return
-        try:
-            txt = json.dumps(ctx, ensure_ascii=False, indent=2)
-            # Tránh log quá dài
-            MAX_LEN = 150_000
-            if len(txt) > MAX_LEN:
-                txt = txt[:MAX_LEN] + "\n... [truncated]"
-            print("[DEBUG GPT INPUT] context:\n", txt)
-        except Exception:
-            pass
+def _debug_enabled() -> bool:
+    return _debug_level() > 0
 
-    def debug_dump_gpt_input(symbol: str, ctx: Dict[str, Any], tag: str = "ctx") -> None:
-        if not _debug_enabled():
-            return
-        try:
-            out_dir = os.getenv("DEBUG_GPT_DIR", "/mnt/data/gpt_inputs")
-            os.makedirs(out_dir, exist_ok=True)
-            ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-            safe_sym = (symbol or "SYMBOL").replace("/", "")
-            path = os.path.join(out_dir, f"{safe_sym}_{tag}_{ts}.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(ctx, f, ensure_ascii=False, indent=2)
-            print(f"[DEBUG] saved GPT input -> {path}")
-        except Exception:
-            pass
+def _ctx_slim(ctx: Dict[str, Any], preview_rows: int = 0) -> Dict[str, Any]:
+    # lọc bỏ raw rows; chỉ hiển thị khung TF, số dòng, và (tuỳ chọn) vài dòng cuối
+    def slim_one(s):
+        if not isinstance(s, dict):
+            return {}
+        rows = s.get("rows") or []
+        out = {
+            "timeframe": s.get("timeframe"),
+            "rows_count": len(rows),
+        }
+        if preview_rows and isinstance(rows, list):
+            tail = rows[-preview_rows:]
+            out["rows_preview"] = tail
+            # thêm danh sách cột để tham khảo nhanh
+            if tail:
+                out["cols"] = list(tail[-1].keys())
+        return out
+    return {
+        "struct_4h": slim_one(ctx.get("struct_4h", {})),
+        "struct_1d": slim_one(ctx.get("struct_1d", {})),
+        "struct_1h": slim_one(ctx.get("struct_1h", {})),
+    }
+
+def debug_print_gpt_input(ctx: Dict[str, Any]) -> None:
+    lvl = _debug_level()
+    if lvl <= 0:
+        return
+    # SLIM khi lvl=1, FULL khi lvl>=2
+    if lvl == 1:
+        preview = int(os.getenv("DEBUG_CTX_PREVIEW", "0") or "0")  # mặc định 0 = không in rows
+        obj = _ctx_slim(ctx, preview_rows=preview)
+        txt = json.dumps(obj, ensure_ascii=False, indent=2)
+        print("[DEBUG GPT INPUT] context (slim):\n", txt)
+    else:
+        txt = json.dumps(ctx, ensure_ascii=False, indent=2)
+        print("[DEBUG GPT INPUT] context (full):\n", txt)
+
+def debug_dump_gpt_input(symbol: str, ctx: Dict[str, Any], tag: str = "ctx") -> None:
+    if not _debug_enabled():
+        return
+    try:
+        out_dir = os.getenv("DEBUG_GPT_DIR", "/mnt/data/gpt_inputs")
+        os.makedirs(out_dir, exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        path = os.path.join(out_dir, f"{symbol or 'UNK'}_{tag}_{ts}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(ctx, f, ensure_ascii=False, indent=2)
+        print(f"[DEBUG] saved GPT input -> {path}")
+    except Exception:
+        pass
+
 
 # ====== Config ======
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # dùng gpt-4o theo yêu cầu
