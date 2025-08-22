@@ -52,73 +52,47 @@ def _exchange(kucoin_key: Optional[str] = None,
     ex.load_markets()
     return ex
 
-
-def _to_dataframe(ohlcv: List[List[float]]) -> pd.DataFrame:
+def _to_dataframe(ohlcv):
     """
-    Convert raw OHLCV to a pandas DataFrame with UTC datetime index.
-    ccxt format: [ timestamp(ms), open, high, low, close, volume ]
+    ccxt OHLCV: [ts_ms, open, high, low, close, volume]
     """
     if not ohlcv:
         return pd.DataFrame(columns=["open","high","low","close","volume"])
     df = pd.DataFrame(ohlcv, columns=["ts","open","high","low","close","volume"])
-    df = df.sort_index()
     df["time"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-    df = df.set_index("time")[["open","high","low","close","volume"]]
+    df = (df.set_index("time")[["open","high","low","close","volume"]]
+            .astype(float)
+            .sort_index())          # BẮT BUỘC: đảm bảo ASC (cũ → mới)
+    df = df[~df.index.duplicated(keep="last")]  # bỏ nến trùng
     return df
 
+def fetch_ohlcv(symbol: str, timeframe: str="4H", limit: int=300, since_ms=None,
+                kucoin_key=None, kucoin_secret=None, kucoin_passphrase=None) -> pd.DataFrame:
+    tf = TIMEFRAME_MAP.get(timeframe.upper(), timeframe)
+    ex = ccxt.kucoin({
+        "apiKey": kucoin_key or "",
+        "secret": kucoin_secret or "",
+        "password": kucoin_passphrase or "",
+        "enableRateLimit": True,
+        "options": {"defaultType": "spot"}
+    })
+    ex.load_markets()
+    sym = symbol.replace("-", "/").replace("USDTUSDT","USDT")
+    if "/" not in sym:
+        sym = sym[:-4] + "/" + sym[-4:]          # DOTUSDT -> DOT/USDT
 
-def fetch_ohlcv(symbol: str,
-                timeframe: str = "4H",
-                limit: int = 100,
-                since_ms: Optional[int] = None,
-                kucoin_key: Optional[str] = None,
-                kucoin_secret: Optional[str] = None,
-                kucoin_passphrase: Optional[str] = None,
-                max_retries: int = 3,
-                retry_wait: float = 1.5) -> pd.DataFrame:
-    """
-    Fetch real OHLCV from KuCoin using ccxt.
-    - symbol: e.g. 'BTCUSDT' or 'BTC/USDT'
-    - timeframe: '4H', '1D', etc. (mapped internally to ccxt timeframes)
-    - limit: number of candles (KuCoin typically supports up to 1500)
-    - since_ms: optional starting timestamp in milliseconds (UTC)
-    """
-    tf = TIMEFRAME_MAP.get(timeframe.upper())
-    if tf is None:
-        raise ValueError(f"Unsupported timeframe: {timeframe}. Use one of {list(TIMEFRAME_MAP.keys())}.")
+    raw = ex.fetch_ohlcv(sym, timeframe=tf, since=since_ms, limit=limit)
+    df  = _to_dataframe(raw)
 
-    norm_symbol = _normalize_symbol(symbol)
-    ex = _exchange(kucoin_key, kucoin_secret, kucoin_passphrase)
+    # (khuyên dùng) bỏ nến đang chạy: giữ nguyên nếu bạn cần “realtime”
+    # bar_ms = ex.parse_timeframe(tf) * 1000
+    # if len(df) >= 2:
+    #     if (int(df.index[-1].value/1e6) % int(bar_ms)) != 0:
+    #         df = df.iloc[:-1]
 
-    err: Optional[Exception] = None
-    for i in range(max_retries):
-        try:
-            data = ex.fetch_ohlcv(norm_symbol, timeframe=tf, since=since_ms, limit=limit)
-            return _to_dataframe(data)
-        except Exception as e:
-            err = e
-            time.sleep(retry_wait * (i + 1))
-    # After retries failed:
-    raise RuntimeError(f"KuCoin fetch_ohlcv failed for {symbol} {timeframe}: {err}")
+    return df
 
+def fetch_batch(symbol: str, timeframes=("1H","4H","1D"), limit=300, since_ms=None, **keys):
+    return {tf: fetch_ohlcv(symbol, timeframe=tf, limit=limit, since_ms=since_ms, **keys)
+            for tf in timeframes}
 
-def fetch_batch(symbol: str,
-                timeframes: Iterable[str] = ("4H","1D"),
-                limit: int = 100,
-                since_ms: Optional[int] = None,
-                kucoin_key: Optional[str] = None,
-                kucoin_secret: Optional[str] = None,
-                kucoin_passphrase: Optional[str] = None) -> Dict[str, pd.DataFrame]:
-    """
-    Fetch multiple timeframes at once. Returns dict mapping tf -> DataFrame.
-    """
-    out: Dict[str, pd.DataFrame] = {}
-    for tf in timeframes:
-        out[tf] = fetch_ohlcv(symbol,
-                              timeframe=tf,
-                              limit=limit,
-                              since_ms=since_ms,
-                              kucoin_key=kucoin_key,
-                              kucoin_secret=kucoin_secret,
-                              kucoin_passphrase=kucoin_passphrase)
-    return out
