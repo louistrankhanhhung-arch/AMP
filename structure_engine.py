@@ -63,9 +63,43 @@ def classify_market_structure_from_swings(swings: List[Dict[str, Any]]) -> List[
 # =====================================================
 # 2) Trend / SR / Pullback / Divergence
 # =====================================================
+def trend_by_ema(df: pd.DataFrame) -> str:
+    df = df.sort_index()
+    e20, e50 = float(df["ema20"].iloc[-1]), float(df["ema50"].iloc[-1])
+    if e20 > e50: return "up"
+    if e20 < e50: return "down"
+    return "side"  # (file gốc dùng "side")
+    
+def snapshot(df: pd.DataFrame) -> dict:
+    df = df.sort_index()
+    last = df.iloc[-1]
+    return {
+        "price": {
+            "open":  float(last["open"]),
+            "high":  float(last["high"]),
+            "low":   float(last["low"]),
+            "close": float(last["close"]),
+        },
+        "ma": {
+            "ema20": float(last["ema20"]),
+            "ema50": float(last["ema50"]),
+        },
+        "bb": {
+            "upper":    float(last["bb_upper"]),
+            "mid":      float(last["bb_mid"]),
+            "lower":    float(last["bb_lower"]),
+            "width_pct": float(last["bb_width_pct"]),
+        },
+        "rsi14": float(last["rsi14"]),
+        "atr14": float(last["atr14"]),
+        "volume": {
+            "last": float(last["volume"]),
+            "sma20": float(last["vol_sma20"]),
+        },
+    }
+
 def detect_trend(df: pd.DataFrame, swings) -> Dict[str, Any]:
-    ema20, ema50 = df['ema20'].iloc[-1], df['ema50'].iloc[-1]
-    state = "up" if ema20 > ema50 else ("down" if ema20 < ema50 else "side")
+    state = trend_by_ema(df)
     age = min(len(df), 100)
     return {"state": state, "basis": "ema20 vs ema50", "age_bars": age}
 
@@ -362,6 +396,8 @@ def eta_for_bands(
 # =====================================================
 # 6) Build STRUCT JSON (có context/liquidity/futures sentiment)
 # =====================================================
+df = df.sort_index()
+
 def build_struct_json(
     symbol: str,
     tf: str,
@@ -410,34 +446,12 @@ def build_struct_json(
     cndl = candle_flags(df)
     ms_tags = classify_market_structure_from_swings(swings)
 
-    struct: Dict[str, Any] = {
-        "symbol": symbol,
-        "asof": str(df.index[-1]),
-        "timeframe": tf,
-        "snapshot": {
-            "price": {
-                "open": float(df['open'].iloc[-1]),
-                "high": float(df['high'].iloc[-1]),
-                "low": float(df['low'].iloc[-1]),
-                "close": close
-            },
-            "ma": {
-                "ema20": float(df['ema20'].iloc[-1]),
-                "ema50": float(df['ema50'].iloc[-1])
-            },
-            "bb": {
-                "upper": float(df['bb_upper'].iloc[-1]),
-                "mid": float(df['bb_mid'].iloc[-1]),
-                "lower": float(df['bb_lower'].iloc[-1]),
-                "width_pct": float(df['bb_width_pct'].iloc[-1])
-            },
-            "rsi14": float(df['rsi14'].iloc[-1]),
-            "atr14": atr,
-            "volume": {
-                "last": float(df['volume'].iloc[-1]),
-                "sma20": float(df['vol_sma20'].iloc[-1])
-            },
-        },
+    "struct": ...,
+    "symbol": symbol,
+    "asof": str(df.index[-1]),
+    "timeframe": tf,
+    "snapshot": snapshot(df),  # <— thay cho khối dài
+
         "structure": {
             "swings": swings,
             "trend": trend,
