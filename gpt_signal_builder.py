@@ -299,6 +299,12 @@ def build_messages_classify(
         "- Yêu cầu tối thiểu: R:R kỳ vọng ≥ 1.5; SL/TP rõ ràng; có **ETA** dự kiến đạt TP1/TP2.\n"
         "- Nếu WAIT: thêm trigger_hint (điểm hoặc kịch bản cụ thể). Nếu AVOID: ghi lý do ngắn gọn.\n"
         "Trả về JSON đúng theo schema sau (tiếng Việt, KHÔNG thêm văn bản ngoài JSON):\n"
+        "- Output chỉ JSON đúng schema; KHÔNG thêm văn bản ngoài JSON.\n"
+        "\n"
+        "[FACTS CHECK — BẮT BUỘC]\n"
+        "- Lấy EMA cuối cùng của từng TF từ dữ liệu (cột 'ema20','ema50').\n"
+        "- Nếu viết lý do về EMA, PHẢI kèm số liệu: '4H ema20=..., ema50=...' và kết luận đúng tuyệt đối (ema20>ema50 ⇒ up; < ⇒ down).\n"
+        "- Nếu facts mâu thuẫn với lý do ⇒ loại bỏ lý do và sửa lại kết luận.\n"
         f"{schema_text}"
     )
 
