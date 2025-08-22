@@ -61,16 +61,6 @@ def enrich_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["vol_sma20"] = pd.to_numeric(df["volume"], errors="coerce").rolling(20).mean()
     df["vol_ratio"] = df["volume"] / df["vol_sma20"]
 
-    # Sanity guard: EMA không thể lệch quá xa close hiện tại
-    if len(df) > 60:
-        close_now = float(c.iloc[-1])
-        for name in ("ema20","ema50"):
-            val = float(df[name].iloc[-1])
-            if not np.isfinite(val) or abs(val - close_now)/max(1e-9, close_now) > 0.12:
-                raise ValueError(
-                    f"[SANITY] {name} lệch bất thường: {val:.4f} vs close {close_now:.4f}. "
-                    "Kiểm tra lại thứ tự nến/khung/thiếu dữ liệu."
-                )
     return df
 
 # =========================
