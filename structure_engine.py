@@ -521,37 +521,37 @@ def build_struct_json(
     cndl = candle_flags(df)
     ms_tags = classify_market_structure_from_swings(swings)
 
-    "struct": ...,
+    struct: Dict[str, Any] = {
     "symbol": symbol,
     "asof": str(df.index[-1]),
     "timeframe": tf,
-    "snapshot": snapshot(df),  # <— thay cho khối dài
+    "snapshot": snapshot(df),  # thay cho block snapshot dài cũ
+    "structure": {
+        "swings": swings,
+        "trend": trend,
+        "pullback": {**pullback, "vol_healthy": volc["pullback_vol_healthy"]},
+        "bb_flags": {
+            "riding_upper_band": flags["riding_upper"],
+            "bb_contraction": flags["bb_squeeze"]
+        },
+        "market_structure": ms_tags,
+    },
+    # SR cứng + SR mềm
+    "levels": {**sr, "soft_sr": soft},
+    # ---- cập nhật targets & eta đối xứng ----
+    "targets": {"up_bands": bands_up, "down_bands": bands_dn},
+    "eta_hint": {"method": "ATR", "per": "bar", "up_bands": eta_up, "down_bands": eta_dn},
+    "confirmations": {"volume": volc, "candles": cndl},
+    # Sự kiện: breakout + breakdown + cờ volume cho cả hai chiều
+    "events": {
+        **bo,
+        **bd,
+        "breakout_vol_ok": volc["breakout_vol_ok"],
+        "breakdown_vol_ok": volc["breakdown_vol_ok"],
+    },
+    "divergence": div,
+}
 
-        "structure": {
-            "swings": swings,
-            "trend": trend,
-            "pullback": {**pullback, "vol_healthy": volc["pullback_vol_healthy"]},
-            "bb_flags": {
-                "riding_upper_band": flags["riding_upper"],
-                "bb_contraction": flags["bb_squeeze"]
-            },
-            "market_structure": ms_tags,
-        },
-        # SR cứng + SR mềm
-        "levels": {**sr, "soft_sr": soft},
-        # ---- cập nhật targets & eta đối xứng ----
-        "targets": {"up_bands": bands_up, "down_bands": bands_dn},
-        "eta_hint": {"method": "ATR", "per": "bar", "up_bands": eta_up, "down_bands": eta_dn},
-        "confirmations": {"volume": volc, "candles": cndl},
-        # Sự kiện: breakout + breakdown + cờ volume cho cả hai chiều
-        "events": {
-            **bo,
-            **bd,
-            "breakout_vol_ok": volc["breakout_vol_ok"],
-            "breakdown_vol_ok": volc["breakdown_vol_ok"],
-        },
-        "divergence": div,
-    }
 
     # Optional: multi-timeframe context
     if context_df is not None:
