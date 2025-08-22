@@ -2,6 +2,7 @@
 from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import pandas as pd
+import logging
 
 # =====================================================
 # 1) Zigzag & Swings (đơn giản)
@@ -465,14 +466,6 @@ def eta_for_bands(
 # =====================================================
 # 6) Build STRUCT JSON (có context/liquidity/futures sentiment)
 # =====================================================
-df = df.sort_index()
-
-warns = sanity_check_indicators(df, tf)
-if warns:
-    # log theo style bạn đang dùng
-    import logging
-    logging.warning(f"[sanity:{symbol} {tf}] " + ", ".join(warns))
-
 def build_struct_json(
     symbol: str,
     tf: str,
@@ -481,6 +474,17 @@ def build_struct_json(
     liquidity_zones: Optional[List[Dict[str, Any]]] = None,
     futures_sentiment: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
+    # Chuẩn hoá và sanity-check NGAY ĐẦU HÀM
+    df = df.sort_index()
+    if context_df is not None and getattr(context_df, "empty", False) is False:
+        context_df = context_df.sort_index()
+
+    try:
+        warns = sanity_check_indicators(df, tf)
+        if warns:
+            logging.warning(f"[sanity:{symbol} {tf}] " + ", ".join(warns))
+    except Exception as e:
+        logging.warning(f"[sanity:{symbol} {tf}] check_failed: {e}")
 
     swings = find_swings(df)
     trend = detect_trend(df, swings)
