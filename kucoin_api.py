@@ -61,6 +61,7 @@ def _to_dataframe(ohlcv: List[List[float]]) -> pd.DataFrame:
     if not ohlcv:
         return pd.DataFrame(columns=["open","high","low","close","volume"])
     df = pd.DataFrame(ohlcv, columns=["ts","open","high","low","close","volume"])
+    df = df.sort_index()
     df["time"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
     df = df.set_index("time")[["open","high","low","close","volume"]]
     return df
