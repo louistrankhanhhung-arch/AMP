@@ -26,7 +26,7 @@ def _fmt_num(x) -> str:
 
 # ====== modules trong repo ======
 try:
-    from indicators import enrich_indicators, enrich_more
+    from indicators import enrich_indicators, enrich_more, calc_vp
 except Exception:  # fallback an toàn nếu thiếu
     enrich_indicators = lambda x: x  # type: ignore
     enrich_more = lambda x: x  # type: ignore
@@ -37,6 +37,7 @@ except Exception:
     fetch_ohlcv = None  # type: ignore
 
 from universe import resolve_symbols
+from structure_engine import build_struct_json
 from gpt_signal_builder import make_telegram_signal
 
 # (tuỳ chọn đăng Telegram & tracker)
@@ -178,16 +179,29 @@ def _build_structs_for(symbols: List[str]) -> List[Dict[str, Any]]:
             df4h = enrich_more(enrich_indicators(df4h_raw)) if df4h_raw is not None else None
             df1d = enrich_more(enrich_indicators(df1d_raw)) if df1d_raw is not None else None
 
-            # thiếu (None) hoặc rỗng (0 rows) thì bỏ
+           # thiếu (None) hoặc rỗng (0 rows) thì bỏ
             if any(d is None or getattr(d, "empty", False) for d in (df1h, df4h, df1d)):
                 logging.info(f"[build] missing TF for {sym}")
                 continue
 
+            # Liquidity zones (volume profile) cho từng TF (tham số có thể tinh chỉnh)
+            lq_1h = calc_vp(df1h, window_bars=160, bins=24, top_k=7)
+            lq_4h = calc_vp(df4h, window_bars=160, bins=24, top_k=7)
+            lq_1d = calc_vp(df1d, window_bars=160, bins=24, top_k=7)
+
+            # Build struct JSON:
+            # - 1H có context 4H
+            # - 4H có context 1D
+            # - 1D không cần context (hoặc bạn có thể fetch 1W nếu muốn)
+            s1h = build_struct_json(sym, "1H", df1h, context_df=df4h, liquidity_zones=lq_1h)
+            s4h = build_struct_json(sym, "4H", df4h, context_df=df1d, liquidity_zones=lq_4h)
+            s1d = build_struct_json(sym, "1D", df1d, context_df=None,  liquidity_zones=lq_1d)
+
             out.append({
                 "symbol": sym,
-                "1H": df1h,
-                "4H": df4h,
-                "1D": df1d,
+                "1H": s1h,
+                "4H": s4h,
+                "1D": s1d,
             })
         except Exception as e:
             logging.warning(f"[build] error {sym}: {e}")
