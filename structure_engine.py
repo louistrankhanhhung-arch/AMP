@@ -143,29 +143,25 @@ def trend_by_ema(df: pd.DataFrame) -> str:
 def snapshot(df: pd.DataFrame) -> dict:
     df = df.sort_index()
     last = df.iloc[-1]
+
+    # Fallback width_pct nếu cột thiếu/NaN
+    if "bb_width_pct" in df.columns and pd.notna(last.get("bb_width_pct", np.nan)):
+        width_pct = float(last["bb_width_pct"])
+    else:
+        upper = float(last["bb_upper"]); lower = float(last["bb_lower"])
+        mid   = float(last["bb_mid"]);   close = float(last["close"])
+        denom = mid if abs(mid) > 1e-12 else close
+        width_pct = float(((upper - lower) / abs(denom)) * 100.0)
+
     return {
-        "price": {
-            "open":  float(last["open"]),
-            "high":  float(last["high"]),
-            "low":   float(last["low"]),
-            "close": float(last["close"]),
-        },
-        "ma": {
-            "ema20": float(last["ema20"]),
-            "ema50": float(last["ema50"]),
-        },
-        "bb": {
-            "upper":    float(last["bb_upper"]),
-            "mid":      float(last["bb_mid"]),
-            "lower":    float(last["bb_lower"]),
-            "width_pct": float(last["bb_width_pct"]),
-        },
-        "rsi14": float(last["rsi14"]),
-        "atr14": float(last["atr14"]),
-        "volume": {
-            "last": float(last["volume"]),
-            "sma20": float(last["vol_sma20"]),
-        },
+        "price":  {"open": float(last["open"]), "high": float(last["high"]),
+                   "low":  float(last["low"]),  "close": float(last["close"])},
+        "ma":     {"ema20": float(last["ema20"]), "ema50": float(last["ema50"])},
+        "bb":     {"upper": float(last["bb_upper"]), "mid": float(last["bb_mid"]),
+                   "lower": float(last["bb_lower"]), "width_pct": width_pct},
+        "rsi14":  float(last["rsi14"]),
+        "atr14":  float(last["atr14"]),
+        "volume": {"last": float(last["volume"]), "sma20": float(last["vol_sma20"])},
     }
 
 def detect_trend(df: pd.DataFrame, swings) -> Dict[str, Any]:
@@ -495,10 +491,23 @@ def build_struct_json(
     bd = detect_breakdown(df, swings, vol_thr=1.5)
 
     # Flags BB
+    # Tự dựng bb_width nếu thiếu
+    if "bb_width_pct" in df.columns:
+        bbw = df["bb_width_pct"].copy()
+    else:
+        upper = df["bb_upper"]; lower = df["bb_lower"]; mid = df["bb_mid"]
+        base = mid.where(mid.abs() > 1e-12, other=df["close"])
+        bbw = ((upper - lower) / base.abs()) * 100.0
+    
+    bbw = bbw.replace([np.inf, -np.inf], np.nan)
+    bbw_med = float(bbw.tail(50).median(skipna=True))
+    bbw_last = float(bbw.iloc[-1]) if np.isfinite(bbw.iloc[-1]) else bbw_med
+    
     flags = {
         "riding_upper": bool(df['close'].iloc[-1] > df['bb_mid'].iloc[-1]),
-        "bb_squeeze": bool(df['bb_width_pct'].iloc[-1] < df['bb_width_pct'].tail(50).median())
+        "bb_squeeze": bool(bbw_last < bbw_med)
     }
+
 
     close = float(df['close'].iloc[-1])
     atr = float(df['atr14'].iloc[-1] or 0.0)
