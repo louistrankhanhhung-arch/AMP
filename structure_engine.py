@@ -63,6 +63,75 @@ def classify_market_structure_from_swings(swings: List[Dict[str, Any]]) -> List[
 # =====================================================
 # 2) Trend / SR / Pullback / Divergence
 # =====================================================
+def _tf_to_ms(tf: str) -> int:
+    tf = tf.upper()
+    if tf.endswith("H"):
+        return int(tf[:-1]) * 60 * 60 * 1000
+    if tf.endswith("D"):
+        return int(tf[:-1]) * 24 * 60 * 60 * 1000
+    if tf.endswith("W"):
+        return int(tf[:-1]) * 7 * 24 * 60 * 60 * 1000
+    return 24 * 60 * 60 * 1000
+
+def sanity_check_indicators(df: pd.DataFrame, tf: str, span: int = 50) -> list:
+    """
+    Trả về danh sách cảnh báo (không raise) để không chặn luồng build.
+    Logic:
+      - Index phải tăng, không trùng.
+      - Nến cuối phải "tươi": cách hiện tại < 2 * bar.
+      - EMA should lie within [min,max] của cửa sổ gần đây (3*span) ± 0.5*ATR14.
+      - (Tuỳ chọn) cảnh báo nếu |close-EMA| > k*ATR (k theo TF).
+    """
+    warns = []
+    if df is None or df.empty:
+        return ["empty df"]
+
+    # 1) Index tăng & unique
+    if not df.index.is_monotonic_increasing:
+        warns.append("index_not_sorted")
+    if df.index.duplicated().any():
+        warns.append("duplicate_timestamps")
+
+    # 2) Freshness
+    try:
+        now_ms = pd.Timestamp.utcnow().value // 10**6
+        last_ms = int(df.index[-1].value / 10**6)
+        bar_ms = _tf_to_ms(tf)
+        if (now_ms - last_ms) > (2 * bar_ms + 5 * 60 * 1000):  # +5' tolerance
+            warns.append("stale_last_bar")
+    except Exception:
+        pass
+
+    # 3) EMA nằm trong dải gần đây
+    win = max(3 * span, 80)
+    sub = df.tail(win)
+    lo = float(sub["close"].min()) if len(sub) else float(df["close"].min())
+    hi = float(sub["close"].max()) if len(sub) else float(df["close"].max())
+    atr = float(df["atr14"].iloc[-1]) if "atr14" in df.columns else 0.0
+    pad = max(0.5 * atr, 1e-9)
+
+    for name in ("ema20", "ema50"):
+        if name not in df.columns:
+            warns.append(f"{name}_missing"); continue
+        val = float(df[name].iloc[-1])
+        if not np.isfinite(val):
+            warns.append(f"{name}_nan"); continue
+        if not ((lo - pad) <= val <= (hi + pad)):
+            warns.append(f"{name}_out_of_recent_range")
+
+    # 4) (Optional) cảnh báo nếu xa close theo ATR (k đổi theo TF)
+    close_now = float(df["close"].iloc[-1])
+    k_map = {"H": 8.0, "D": 6.0, "W": 5.0}  # nới lỏng cho TF lớn
+    key = "H" if tf.upper().endswith("H") else ("D" if tf.upper().endswith("D") else "W")
+    k = k_map.get(key, 6.0)
+    if atr > 0:
+        for name in ("ema20", "ema50"):
+            val = float(df[name].iloc[-1])
+            if abs(val - close_now) > k * atr:
+                warns.append(f"{name}_far_from_close_{int(k)}xATR")
+
+    return warns
+
 def trend_by_ema(df: pd.DataFrame) -> str:
     df = df.sort_index()
     e20, e50 = float(df["ema20"].iloc[-1]), float(df["ema50"].iloc[-1])
@@ -397,6 +466,12 @@ def eta_for_bands(
 # 6) Build STRUCT JSON (có context/liquidity/futures sentiment)
 # =====================================================
 df = df.sort_index()
+
+warns = sanity_check_indicators(df, tf)
+if warns:
+    # log theo style bạn đang dùng
+    import logging
+    logging.warning(f"[sanity:{symbol} {tf}] " + ", ".join(warns))
 
 def build_struct_json(
     symbol: str,
