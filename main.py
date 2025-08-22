@@ -18,6 +18,12 @@ from bot_handlers import register_handlers
 def _df_ok(df):
     return (df is not None) and (not getattr(df, "empty", False))
 
+def _fmt_num(x) -> str:
+    try:
+        return f"{float(x):g}"
+    except Exception:
+        return str(x)
+
 # ====== modules trong repo ======
 try:
     from indicators import enrich_indicators, enrich_more
@@ -269,87 +275,49 @@ def scan_once_for_logs():
                     plan = out["enter_plans"][0] or {}
                 meta  = out.get("meta") or {}
                 plans = out.get("plans") or {}
-                p_intra = plans.get("intraday_1h") or plans.get("intraday") or {}
-                p_swing = plans.get("swing_4h")    or plans.get("swing")    or {}
-                
-                # --- Fallback cho decision/action/side/conf ---
+                p_tplus = plans.get("tplus") or {}
+                meta  = out.get("meta") or {}
+
+                # --- Quy ước T+ mới ---
                 decision = out.get("decision") or {}
                 if not decision:
                     if plan:  # có plan => coi như ENTER
                         decision = {
                             "action": "ENTER",
                             "side": plan.get("side") or "long",
-                            "confidence": (
-                                plan.get("confidence")
-                                or meta.get("intraday_conf")
-                                or meta.get("swing_conf")
-                            ),
+                            "confidence": plan.get("confidence") or meta.get("tplus_conf"),
                             "trigger": plan.get("trigger"),
                             "reason": plan.get("reason"),
                         }
                     else:
-                        intr = str(meta.get("intraday_decision") or "").upper()
-                        swg  = str(meta.get("swing_decision") or "").upper()
-                        if "WAIT" in {intr, swg}:
-                            guessed_action = "WAIT"
-                        elif "AVOID" in {intr, swg}:
-                            guessed_action = "AVOID"
-                        else:
-                            guessed_action = intr or swg or "WAIT"
-                
-                        side_guess = (
-                            p_intra.get("side") or p_swing.get("side") or "none"
-                        )
-                        conf_guess = (
-                            p_intra.get("confidence")
-                            or p_swing.get("confidence")
-                            or meta.get("intraday_conf")
-                            or meta.get("swing_conf")
-                        )
+                        tdec = str(meta.get("tplus_decision") or p_tplus.get("decision") or "").upper()
+                        guessed_action = tdec or "WAIT"
                         decision = {
                             "action": guessed_action,
-                            "side": side_guess,
-                            "confidence": conf_guess,
+                            "side": p_tplus.get("side") or "none",
+                            "confidence": p_tplus.get("confidence") or meta.get("tplus_conf"),
                         }
-                
+
                 # === Chuẩn hoá biến để log header ===
-                action = str(decision.get("action") or "").upper()
-                if not action:  # bảo đảm header không hiện N/A
-                    intr = str(meta.get("intraday_decision") or "").upper()
-                    swg  = str(meta.get("swing_decision") or "").upper()
-                    action = "WAIT" if "WAIT" in {intr, swg} else ("AVOID" if "AVOID" in {intr, swg} else "N/A")
-                
-                side = (
-                    str(decision.get("side") or "")
-                    or plan.get("side")
-                    or p_intra.get("side")
-                    or p_swing.get("side")
-                    or "none"
-                )
-                conf = (
+                action = (decision.get("action") or "").upper() or (p_tplus.get("decision") or "").upper() or "WAIT"
+                side   = (decision.get("side") or plan.get("side") or p_tplus.get("side") or "none")
+                conf   = (
                     decision.get("confidence")
                     or plan.get("confidence")
-                    or meta.get("intraday_conf")
-                    or meta.get("swing_conf")
-                    or p_intra.get("confidence")
-                    or p_swing.get("confidence")
+                    or p_tplus.get("confidence")
+                    or meta.get("tplus_conf")
                 )
-                
-                # (tuỳ chọn) Lấy trigger/reason để dùng nếu cần
+
+                # (tuỳ chọn) Trigger/Reason
                 trigger = (
                     decision.get("trigger")
                     or plan.get("trigger")
-                    or p_intra.get("trigger_hint")
-                    or p_swing.get("trigger_hint")
-                    or meta.get("trigger_hint")
-                    or meta.get("trigger")
+                    or p_tplus.get("trigger_hint")
+                    or meta.get("trigger_hint") or meta.get("trigger")
                 )
-                reason = (
-                    decision.get("reason")
-                    or plan.get("reason")
-                    or ((p_intra.get("reasons") or []) + (p_swing.get("reasons") or []) or [None])[0]
-                )
-                
+                reasons_list = p_tplus.get("reasons") or []
+                reason = decision.get("reason") or plan.get("reason") or (reasons_list[0] if reasons_list else None)
+               
                 # === LOG HEADER + 2 BLOCK PHÂN TÍCH ===
                 print(f"[signal] {sym} | {action} side={side} conf={conf}")
                 if analysis_text:
@@ -406,7 +374,7 @@ def scan_once_for_logs():
                 tg_sig = TgSignal(
                     signal_id=plan.get("signal_id") or out.get("signal_id") or f"{sym.replace('/','')}-{int(time.time())}",
                     symbol=sym.replace("/", ""),
-                    timeframe=plan.get("timeframe") or "4H",
+                    timeframe=plan.get("timeframe") or "T+",
                     side=plan.get("side") or side or "long",
                     strategy=strategy,
                     entries=entries,
