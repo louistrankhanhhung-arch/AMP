@@ -43,13 +43,16 @@ def rolling_zscore(series: pd.Series, window=20):
 # =========================
 # Enrich: base indicators
 # =========================
+# --- indicators.py ---
+
 def enrich_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
 
-    df = df.sort_index()  # ĐẢM BẢO ASC
+    df = df.sort_index()
     c = pd.to_numeric(df["close"], errors="coerce")
 
+    # EMA/RSI/BB/ATR như bạn đã có...
     df["ema20"] = ema(c, 20)
     df["ema50"] = ema(c, 50)
     df["rsi14"] = rsi(c, 14)
@@ -57,11 +60,18 @@ def enrich_indicators(df: pd.DataFrame) -> pd.DataFrame:
     bb_u, bb_m, bb_l = bollinger(c, 20, 2.0)
     df["bb_upper"], df["bb_mid"], df["bb_lower"] = bb_u, bb_m, bb_l
 
+    # >>> Thêm: bb_width_pct (an toàn số học)
+    width = (df["bb_upper"] - df["bb_lower"])
+    base = df["bb_mid"].where(df["bb_mid"].abs() > 1e-12, other=c)  # mid=0 thì fallback close
+    df["bb_width_pct"] = (width / base.abs()) * 100.0
+    df["bb_width_pct"] = df["bb_width_pct"].replace([np.inf, -np.inf], np.nan)
+
     df["atr14"] = atr(df, 14)
     df["vol_sma20"] = pd.to_numeric(df["volume"], errors="coerce").rolling(20).mean()
     df["vol_ratio"] = df["volume"] / df["vol_sma20"]
 
     return df
+
 
 # =========================
 # Enrich: volume, candle anatomy, SMAs (cho SR mềm)
