@@ -85,32 +85,21 @@ def debug_dump_gpt_input(symbol: str, ctx: Dict[str, Any], tag: str = "ctx") -> 
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # dùng gpt-4o theo yêu cầu
 client = OpenAI()
 
-# ====== Schema output mong đợi từ GPT (2 kế hoạch) ======
+# ====== Schema output mong đợi từ GPT (1 kế hoạch T+) ======
 CLASSIFY_SCHEMA = {
     "symbol": "BTC/USDT",
-    "plans": {
-        "intraday_1h": {
-            "decision": "ENTER | WAIT | AVOID",
-            "side": "long | short",
-            "confidence": 0.0,
-            "strategy": "retest | reclaim | breakout | range | countertrend",
-            "entries": [0.0],
-            "sl": 0.0,
-            "tps": [0.0, 0.0],
-            "reasons": ["..."],
-            "trigger_hint": "nếu WAIT: nêu điều kiện kích hoạt cụ thể"
-        },
-        "swing_4h": {
-            "decision": "ENTER | WAIT | AVOID",
-            "side": "long | short",
-            "confidence": 0.0,
-            "strategy": "trend-follow | breakout | retest | range",
-            "entries": [0.0],
-            "sl": 0.0,
-            "tps": [0.0, 0.0],
-            "reasons": ["..."],
-            "trigger_hint": "nếu WAIT: nêu điều kiện kích hoạt cụ thể"
-        }
+    "tplus": {
+        "decision": "ENTER | WAIT | AVOID",
+        "side": "long | short",
+        "confidence": 0.0,
+        "strategy": "trend-follow | breakout | reclaim | retest | range | countertrend",
+        "entries": [0.0],
+        "sl": 0.0,
+        "tps": [0.0, 0.0],
+        "eta": "thời gian ước tính đạt TP1/TP2 (ví dụ: '4–12h')",
+        "leverage": "tùy chọn, nếu có",
+        "reasons": ["..."],
+        "trigger_hint": "nếu WAIT: nêu điều kiện kích hoạt cụ thể"
     }
 }
 
@@ -207,7 +196,8 @@ def _render_simple_signal(symbol: str, decision: Dict[str, Any], label: str | No
     lines.append("")
     lines.append(f"Strategy: {strategy}")
     return "\n".join(lines)
-def _analysis_lines(symbol: str, decision: Dict[str, Any], tag: str) -> List[str]:
+
+def _analysis_lines(symbol: str, decision: Dict[str, Any], tag: str = "T+") -> List[str]:
     act = (decision.get("decision") or decision.get("action") or "").upper()
     side = (decision.get("side") or "long").lower()
     conf = decision.get("confidence")
@@ -222,15 +212,10 @@ def _analysis_lines(symbol: str, decision: Dict[str, Any], tag: str) -> List[str
         lines.append(f"- Trigger: {hint}")
     return lines
 
-def _merge_analysis(symbol: str, p1: Optional[Dict[str, Any]], p2: Optional[Dict[str, Any]]) -> str:
-    blocks: List[str] = []
-    if p1:
-        blocks.append("\n".join(_analysis_lines(symbol, p1, "INTRADAY")))
-    if p2:
-        blocks.append("\n".join(_analysis_lines(symbol, p2, "SWING")))
-    if not blocks:
+def _analysis_one(symbol: str, plan: Optional[Dict[str, Any]]) -> str:
+    if not plan:
         return f"[ĐÁNH GIÁ] {symbol} | N/A"
-    return "\n\n".join(blocks)
+    return "\n".join(_analysis_lines(symbol, plan, "T+"))
 
 # ====== Prompt xây dựng ======
 def _df_to_struct(df, tf_label: str) -> Dict[str, Any]:
@@ -256,8 +241,8 @@ def build_messages_classify(
     symbol_hint: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Gửi đầy đủ context 1D/4H/1H. Yêu cầu GPT trả về 2 kế hoạch song song.
-    ĐÃ THÊM ENTRY PROXIMITY GATE với tol = max(0.005 * current_price, 0.15 * ATR_1H).
+    Gửi đầy đủ context 1D/4H/1H. Yêu cầu GPT trả về 1 kế hoạch T+.
+    ENTRY PROXIMITY GATE: tol = 0.015 * current_price.
     Bảo đảm tương thích /v1/chat/completions: messages là LIST và content là STRING.
     """
     # Helper an toàn cho json.dumps (tránh lỗi numpy/timestamp)
@@ -288,7 +273,7 @@ def build_messages_classify(
     except Exception:
         pass
 
-    # ====== SYSTEM TEXT with ENTRY PROXIMITY GATE (NỚI) ======
+    # ====== SYSTEM TEXT for T+ (gộp 1H-4H-1D) with ENTRY PROXIMITY GATE ======
     # Lấy schema text an toàn
     try:
         schema_text = _safe_dumps_local(CLASSIFY_SCHEMA)
@@ -296,39 +281,31 @@ def build_messages_classify(
         schema_text = _safe_dumps_local({"note": "CLASSIFY_SCHEMA unavailable"})
 
     system_text = (
-        "[ENTRY PROXIMITY GATE — BẮT BUỘC]\\n"
-        "- current_price = giá đóng nến gần nhất của khung 1H trong dữ liệu đầu vào.\\n"
-        "- entries = mảng mức vào lệnh đề xuất. Định nghĩa vùng: lo = min(entries), hi = max(entries). "
-        "Nếu chỉ có 1 mức thì coi lo = hi.\\n"
-        "- tolerance (nới): tol = 0.015 * current_price. Không sử dụng ATR_1H trong ENTRY PROXIMITY GATE.\\n"
-        "- Áp dụng CHO TỪNG kế hoạch (intraday_1h và swing_4h):\\n"
-        "    * Chỉ được trả action = \\\"ENTER\\\" nếu current_price ∈ [lo - tol, hi + tol]. "
-        "(tức giá đang ở ngay/sát vùng entry, có thể vào ngay).\\n"
-        "    * Nếu nằm ngoài khoảng trên ⇒ action = \\\"WAIT\\\" và BẮT BUỘC có trigger_hint "
-        "(điểm/kịch bản cụ thể, ví dụ: 'retest biên lo–hi ± tol' hoặc 'close 1H > ngưỡng breakout + volume > SMA20').\\n"
-        "    * Không đuổi giá: nếu Long và current_price > hi + tol (hoặc Short và current_price < lo - tol) ⇒ WAIT.\\n"
-        "    * Với strategy \\\"breakout\\\"/\\\"reclaim\\\": trigger_hint = điều kiện đóng nến vượt biên + xác nhận volume.\\n"
-        "      Với \\\"retest\\\"/\\\"pullback\\\": trigger_hint = chạm lại zone lo–hi (có thể ghi biên ±tol).\\n"
-        "    * Nếu entries rỗng/không hợp lệ ⇒ luôn WAIT và nêu rõ trigger_hint.\\n"
-        "- Output chỉ JSON đúng schema; KHÔNG thêm văn bản ngoài JSON.\\n"
-        "\\n"
-        "Bạn là trader kỹ thuật. Với JSON 3 khung **1D / 4H / 1H**, hãy trả về **2 kế hoạch độc lập**:\\n"
-        "1) intraday_1h: setup theo 1H (lướt sóng ngắn).\\n"
-        "2) swing_4h: setup theo 4H (đồng pha 1D, giữ lệnh dài hơn).\\n\\n"
-        "Tiêu chuẩn:\\n"
-        "- Intraday (1H): chấp nhận RSI quá mua/bán nếu có xác nhận volume; yêu cầu R:R ≥ 1.5; "
-        "ưu tiên reclaim/retest/mini-breakout; SL chặt; vị thế ≤ 0.3–0.5R.\\n"
-        "- Swing (4H): 4H phải đồng pha với 1D; tránh trade ngược xu hướng lớn; yêu cầu R:R ≥ 2.0; vị thế 1.0R chuẩn.\\n"
-        "Nếu WAIT: thêm trigger_hint (điểm hoặc kịch bản cụ thể). Nếu AVOID: ghi lý do ngắn gọn.\\n"
-        "Trả về JSON đúng theo schema sau (tiếng Việt, KHÔNG thêm văn bản ngoài JSON):\\n"
+        "[ENTRY PROXIMITY GATE — BẮT BUỘC]\n"
+        "- current_price = giá đóng nến gần nhất của khung 1H trong dữ liệu đầu vào.\n"
+        "- entries = mảng mức vào lệnh đề xuất. Định nghĩa vùng: lo = min(entries), hi = max(entries). Nếu chỉ có 1 mức thì coi lo = hi.\n"
+        "- tolerance (nới): tol = 0.015 * current_price. Không sử dụng ATR_1H trong ENTRY PROXIMITY GATE.\n"
+        "- Áp dụng CHO KẾ HOẠCH T+ DUY NHẤT:\n"
+        "    * Chỉ được trả action = \"ENTER\" nếu current_price ∈ [lo - tol, hi + tol]. (tức giá đang ở ngay/sát vùng entry, có thể vào ngay).\n"
+        "    * Nếu nằm ngoài khoảng trên ⇒ action = \"WAIT\" và BẮT BUỘC có trigger_hint (điểm/kịch bản cụ thể, ví dụ: 'retest biên lo–hi ± tol' hoặc 'close 1H > ngưỡng breakout + volume > SMA20').\n"
+        "    * Không đuổi giá: nếu Long và current_price > hi + tol (hoặc Short và current_price < lo - tol) ⇒ WAIT.\n"
+        "    * Với strategy \"breakout\"/\"reclaim\": trigger_hint = điều kiện đóng nến vượt biên + xác nhận volume.\n"
+        "      Với \"retest\"/\"pullback\": trigger_hint = chạm lại zone lo–hi (có thể ghi biên ±tol).\n"
+        "    * Nếu entries rỗng/không hợp lệ ⇒ luôn WAIT và nêu rõ trigger_hint.\n"
+        "- Output chỉ JSON đúng schema; KHÔNG thêm văn bản ngoài JSON.\n"
+        "\n"
+        "Bạn là trader kỹ thuật. Với JSON 3 khung **1D / 4H / 1H**, hãy trả về **1 kế hoạch T+ duy nhất** (giữ tối đa 2–5 ngày, có thể vào ngay khi đủ điều kiện proximity):\n"
+        "- Ưu tiên 4H đồng pha 1D; nếu countertrend (4H ngược 1D) phải ghi rõ 'countertrend' trong strategy và hạ confidence.\n"
+        "- Yêu cầu tối thiểu: R:R kỳ vọng ≥ 1.5; SL/TP rõ ràng; có **ETA** dự kiến đạt TP1/TP2.\n"
+        "- Nếu WAIT: thêm trigger_hint (điểm hoặc kịch bản cụ thể). Nếu AVOID: ghi lý do ngắn gọn.\n"
+        "Trả về JSON đúng theo schema sau (tiếng Việt, KHÔNG thêm văn bản ngoài JSON):\n"
         f"{schema_text}"
     )
-
 
     system = {"role": "system", "content": system_text}
 
     # Với /v1/chat/completions, content của user nên là STRING (không phải list part)
-    user_text = "Context JSON (1D/4H/1H):\\n" + _safe_dumps_local(ctx)
+    user_text = "Context JSON (1D/4H/1H):\n" + _safe_dumps_local(ctx)
     user = {"role": "user", "content": user_text}
 
     messages = [system, user]
@@ -359,9 +336,8 @@ def make_telegram_signal(
         return {"ok": False, "error": "missing/empty frame(s)"}
     """
     - Gọi GPT-4o với 1H/4H/1D đầy đủ.
-    - Nhận 2 kế hoạch: intraday_1h & swing_4h.
-    - Nếu bất kỳ kế hoạch nào ENTER: tạo telegram_text tương ứng (kèm nhãn).
-      Để tương thích ngược: chọn intraday nếu ENTER, nếu không chọn swing; đồng thời trả thêm telegram_texts (list).
+    - Nhận 1 kế hoạch: T+.
+    - Nếu ENTER: tạo telegram_text tương ứng.
     - WAIT/AVOID: chỉ log analysis (gồm trigger_hint nếu WAIT).
     """
     try:
@@ -380,11 +356,9 @@ def make_telegram_signal(
 
         symbol = (symbol_hint or data.get("symbol") or "SYMBOL")
 
-        plans = data.get("plans") or {}
-        p_intra = plans.get("intraday_1h") or {}
-        p_swing = plans.get("swing_4h") or {}
+        p_tplus = data.get("tplus") or {}
 
-        # Chuẩn hoá fields cho từng plan
+        # Chuẩn hoá fields cho plan
         def _norm(p: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "decision": (p.get("decision") or p.get("action") or "WAIT").upper(),
@@ -400,55 +374,35 @@ def make_telegram_signal(
                 "eta": p.get("eta"),
             }
 
-        p_intra = _norm(p_intra)
-        p_swing = _norm(p_swing)
+        p_tplus = _norm(p_tplus)
 
-        # Build telegram texts (nếu ENTER)
+        # Build telegram text (nếu ENTER)
         telegram_texts: List[str] = []
         enter_plans: List[Dict[str, Any]] = []
 
-        if p_intra["decision"] == "ENTER":
-            telegram_texts.append(_render_simple_signal(symbol, p_intra, label="INTRADAY"))
-            enter_plans.append({"label": "INTRADAY", **p_intra})
+        if p_tplus["decision"] == "ENTER":
+            telegram_texts.append(_render_simple_signal(symbol, p_tplus, label="T+"))
+            enter_plans.append({"label": "T+", **p_tplus})
 
-        if p_swing["decision"] == "ENTER":
-            telegram_texts.append(_render_simple_signal(symbol, p_swing, label="SWING"))
-            enter_plans.append({"label": "SWING", **p_swing})
-
-        # Tương thích ngược: chọn 1 plan “chính” nếu có
+        # Chọn plan “chính” nếu có
         telegram_text = None
         plan_primary = None
         if telegram_texts:
-            # ưu tiên intraday; nếu không có thì swing
-            if p_intra["decision"] == "ENTER":
-                telegram_text = telegram_texts[0]  # intraday đứng trước nếu có
-                plan_primary = {
-                    "signal_id": f"{symbol.replace('/','')}-{int(time.time())}",
-                    "timeframe": "1H",
-                    "side": p_intra["side"],
-                    "strategy": p_intra.get("strategy") or "GPT-plan",
-                    "entries": p_intra.get("entries") or [],
-                    "sl": p_intra.get("sl"),
-                    "tps": p_intra.get("tps") or [],
-                    "leverage": p_intra.get("leverage"),
-                    "eta": p_intra.get("eta"),
-                }
-            else:
-                telegram_text = telegram_texts[-1]  # swing
-                plan_primary = {
-                    "signal_id": f"{symbol.replace('/','')}-{int(time.time())}",
-                    "timeframe": "4H",
-                    "side": p_swing["side"],
-                    "strategy": p_swing.get("strategy") or "GPT-plan",
-                    "entries": p_swing.get("entries") or [],
-                    "sl": p_swing.get("sl"),
-                    "tps": p_swing.get("tps") or [],
-                    "leverage": p_swing.get("leverage"),
-                    "eta": p_swing.get("eta"),
-                }
+            telegram_text = telegram_texts[0]
+            plan_primary = {
+                "signal_id": f"{symbol.replace('/','')}-{int(time.time())}",
+                "timeframe": "T+",
+                "side": p_tplus["side"],
+                "strategy": p_tplus.get("strategy") or "GPT-plan",
+                "entries": p_tplus.get("entries") or [],
+                "sl": p_tplus.get("sl"),
+                "tps": p_tplus.get("tps") or [],
+                "leverage": p_tplus.get("leverage"),
+                "eta": p_tplus.get("eta"),
+            }
 
-        # Phần phân tích (gộp 2 block)
-        analysis_text = _merge_analysis(symbol, p_intra, p_swing)
+        # Phần phân tích (1 block T+)
+        analysis_text = _analysis_one(symbol, p_tplus)
 
         return {
             "ok": True,
@@ -458,17 +412,12 @@ def make_telegram_signal(
             "analysis_text": analysis_text,           # luôn có
             "plan": plan_primary,                     # 1 plan chính (nếu có)
             # mở rộng:
-            "telegram_texts": telegram_texts,         # tất cả ENTER
-            "plans": {                                # trả full 2 plan
-                "intraday_1h": p_intra,
-                "swing_4h": p_swing
-            },
-            "enter_plans": enter_plans,               # các plan ENTER có nhãn
+            "telegram_texts": telegram_texts,         # 1 phần tử nếu ENTER
+            "plans": {"tplus": p_tplus},              # trả full T+ plan
+            "enter_plans": enter_plans,               # nếu ENTER
             "meta": {
-                "intraday_decision": p_intra["decision"],
-                "swing_decision": p_swing["decision"],
-                "intraday_conf": p_intra.get("confidence"),
-                "swing_conf": p_swing.get("confidence"),
+                "tplus_decision": p_tplus["decision"],
+                "tplus_conf": p_tplus.get("confidence"),
             },
         }
 
