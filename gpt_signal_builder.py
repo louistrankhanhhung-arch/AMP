@@ -305,6 +305,11 @@ def build_messages_classify(
         "- Lấy EMA cuối cùng của từng TF từ dữ liệu (cột 'ema20','ema50').\n"
         "- Nếu viết lý do về EMA, PHẢI kèm số liệu: '4H ema20=..., ema50=...' và kết luận đúng tuyệt đối (ema20>ema50 ⇒ up; < ⇒ down).\n"
         "- Nếu facts mâu thuẫn với lý do ⇒ loại bỏ lý do và sửa lại kết luận.\n"
+        "[TIMEFRAME BINDING — BẮT BUỘC]\n"
+        "- Chỉ được phân tích EMA, RSI, Volume, Price của từng timeframe dựa trên dữ liệu đúng khung đó (1D, 4H, 1H).\n"
+        "- Tuyệt đối KHÔNG suy diễn dữ liệu khung này sang khung khác.\n"
+        "- Mọi kết luận phải ghi rõ khung tham chiếu, ví dụ: '1D giá > ema20=0.8538, ema50=0.7947 (uptrend trung hạn)'.\n"
+        "- Nếu dữ liệu của 1 timeframe bị thiếu hoặc không hợp lệ, hãy ghi chú và bỏ qua khung đó thay vì suy đoán.\n"
         f"{schema_text}"
     )
 
