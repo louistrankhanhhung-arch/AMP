@@ -300,8 +300,7 @@ def build_messages_classify(
         "- current_price = giá đóng nến gần nhất của khung 1H trong dữ liệu đầu vào.\\n"
         "- entries = mảng mức vào lệnh đề xuất. Định nghĩa vùng: lo = min(entries), hi = max(entries). "
         "Nếu chỉ có 1 mức thì coi lo = hi.\\n"
-        "- tolerance (nới): tol = max(0.005 * current_price, 0.15 * ATR_1H). "
-        "Nếu JSON không có ATR_1H thì coi ATR_1H = 0 (tức tol = 0.005 * current_price).\\n"
+        "- tolerance (nới): tol = 0.015 * current_price. Không sử dụng ATR_1H trong ENTRY PROXIMITY GATE.\\n"
         "- Áp dụng CHO TỪNG kế hoạch (intraday_1h và swing_4h):\\n"
         "    * Chỉ được trả action = \\\"ENTER\\\" nếu current_price ∈ [lo - tol, hi + tol]. "
         "(tức giá đang ở ngay/sát vùng entry, có thể vào ngay).\\n"
@@ -324,6 +323,7 @@ def build_messages_classify(
         "Trả về JSON đúng theo schema sau (tiếng Việt, KHÔNG thêm văn bản ngoài JSON):\\n"
         f"{schema_text}"
     )
+
 
     system = {"role": "system", "content": system_text}
 
