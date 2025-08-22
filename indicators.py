@@ -6,35 +6,34 @@ import numpy as np
 # Moving Averages & Oscillators
 # =========================
 def ema(series: pd.Series, span: int) -> pd.Series:
+    # TradingView-compatible
+    series = pd.to_numeric(series, errors="coerce")
     return series.ewm(span=span, adjust=False).mean()
 
 def sma(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window).mean()
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    roll_up = up.ewm(alpha=1/period, adjust=False).mean()
+    s = pd.to_numeric(series, errors="coerce")
+    delta = s.diff()
+    up, down = delta.clip(lower=0), -delta.clip(upper=0)
+    roll_up   = up.ewm(alpha=1/period, adjust=False).mean()   # Wilder
     roll_down = down.ewm(alpha=1/period, adjust=False).mean()
     rs = roll_up / roll_down.replace(0, np.nan)
-    out = 100 - (100 / (1 + rs))
-    return out.fillna(50)
+    return 100 - (100 / (1 + rs))
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high_low  = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close  = (df['low']  - df['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
+    h, l, c = df["high"], df["low"], df["close"]
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    # Wilder’s RMA (sát TV hơn)
+    return tr.ewm(alpha=1/period, adjust=False).mean()
 
 def bollinger(series: pd.Series, window: int = 20, num_std: float = 2.0):
-    mid = sma(series, window)
-    std = series.rolling(window).std()
-    upper = mid + num_std * std
-    lower = mid - num_std * std
-    width_pct = (upper - lower) / mid.replace(0, np.nan) * 100
-    return upper, mid, lower, width_pct
+    s = pd.to_numeric(series, errors="coerce")
+    mid = s.rolling(window).mean()
+    std = s.rolling(window).std(ddof=0)
+    upper, lower = mid + num_std*std, mid - num_std*std
+    return upper, mid, lower
 
 def rolling_zscore(series: pd.Series, window=20):
     mu = series.rolling(window).mean()
@@ -45,22 +44,34 @@ def rolling_zscore(series: pd.Series, window=20):
 # Enrich: base indicators
 # =========================
 def enrich_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out['ema20'] = ema(out['close'], 20)
-    out['ema50'] = ema(out['close'], 50)
+    if df is None or df.empty:
+        return df
 
-    ub, mid, lb, width_pct = bollinger(out['close'], 20, 2.0)
-    out['bb_upper'], out['bb_mid'], out['bb_lower'], out['bb_width_pct'] = ub, mid, lb, width_pct
+    df = df.sort_index()  # ĐẢM BẢO ASC
+    c = pd.to_numeric(df["close"], errors="coerce")
 
-    out['rsi14']  = rsi(out['close'], 14)
-    out['atr14']  = atr(out, 14)
+    df["ema20"] = ema(c, 20)
+    df["ema50"] = ema(c, 50)
+    df["rsi14"] = rsi(c, 14)
 
-    out['vol_sma20'] = sma(out['volume'], 20)
-    out['vol_ratio'] = out['volume'] / out['vol_sma20'].replace(0, np.nan)
+    bb_u, bb_m, bb_l = bollinger(c, 20, 2.0)
+    df["bb_upper"], df["bb_mid"], df["bb_lower"] = bb_u, bb_m, bb_l
 
-    out['dist_to_ema20_pct'] = (out['close'] - out['ema20']) / out['ema20'].replace(0, np.nan) * 100
-    out['dist_to_ema50_pct'] = (out['close'] - out['ema50']) / out['ema50'].replace(0, np.nan) * 100
-    return out
+    df["atr14"] = atr(df, 14)
+    df["vol_sma20"] = pd.to_numeric(df["volume"], errors="coerce").rolling(20).mean()
+    df["vol_ratio"] = df["volume"] / df["vol_sma20"]
+
+    # Sanity guard: EMA không thể lệch quá xa close hiện tại
+    if len(df) > 60:
+        close_now = float(c.iloc[-1])
+        for name in ("ema20","ema50"):
+            val = float(df[name].iloc[-1])
+            if not np.isfinite(val) or abs(val - close_now)/max(1e-9, close_now) > 0.12:
+                raise ValueError(
+                    f"[SANITY] {name} lệch bất thường: {val:.4f} vs close {close_now:.4f}. "
+                    "Kiểm tra lại thứ tự nến/khung/thiếu dữ liệu."
+                )
+    return df
 
 # =========================
 # Enrich: volume, candle anatomy, SMAs (cho SR mềm)
