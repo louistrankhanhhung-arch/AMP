@@ -302,8 +302,8 @@ def build_messages_classify(
         "- Output chỉ JSON đúng schema; KHÔNG thêm văn bản ngoài JSON.\n"
         "\n"
         "[FACTS CHECK — BẮT BUỘC]\n"
-        "- Lấy EMA cuối cùng của từng TF từ dữ liệu (cột 'ema20','ema50').\n"
-        "- Nếu viết lý do về EMA, PHẢI kèm số liệu: '4H ema20=..., ema50=...' và kết luận đúng tuyệt đối (ema20>ema50 ⇒ up; < ⇒ down).\n"
+        "- Lấy EMA cuối cùng của từng TF từ JSON đầu vào. Ưu tiên 'snapshot.ma.ema20' và 'snapshot.ma.ema50'; nếu không có snapshot thì mới lấy từ các dòng cuối cùng trong 'rows[*].ema20/ema50' (nếu được cung cấp).\n"
+        "- Nếu nêu lý do dựa trên EMA, PHẢI kèm số liệu: ví dụ '4H ema20=…, ema50=…' và kết luận đúng (ema20>ema50 ⇒ up; < ⇒ down).
         "- Nếu facts mâu thuẫn với lý do ⇒ loại bỏ lý do và sửa lại kết luận.\n"
         "[TIMEFRAME BINDING — BẮT BUỘC]\n"
         "- Chỉ được phân tích EMA, RSI, Volume, Price của từng timeframe dựa trên dữ liệu đúng khung đó (1D, 4H, 1H).\n"
