@@ -1,46 +1,50 @@
-# app/kucoin_api.py
+# kucoin_api.py (refactored: SPOT-only + partial-bar only for 1H)
+# -----------------------------------------------------------------
+# - Unified ccxt client (SPOT only)
+# - Symbol normalization/validation
+# - Clean DataFrame conversion
+# - Retry/backoff
+# - Deep historical pagination
+# - Partial-bar drop is applied ONLY for 1H timeframe (per requirement)
+
+from __future__ import annotations
+
 import time
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
-import ccxt
+import ccxt  # type: ignore
 
-
-TIMEFRAME_MAP = {
+# ---------------------------------
+# Timeframe mapping (friendly -> ccxt)
+# ---------------------------------
+TIMEFRAME_MAP: Dict[str, str] = {
     "1H": "1h",
     "4H": "4h",
     "1D": "1d",
     "1W": "1w",
 }
 
-
-def _normalize_symbol(symbol: str) -> str:
-    """
-    Convert common forms like 'BTCUSDT' or 'btc/usdt' into 'BTC/USDT' for ccxt.
-    """
-    s = symbol.strip().upper()
-    if "/" in s:
-        base, quote = s.split("/", 1)
-        return f"{base}/{quote}"
-    if s.endswith("USDT"):
-        base = s[:-4]
-        return f"{base}/USDT"
-    if s.endswith("USD"):
-        base = s[:-3]
-        return f"{base}/USD"
-    # Fallback (let ccxt validate)
-    return s
+# ---------------------------------
+# Client factory (single source of truth) — SPOT only
+# ---------------------------------
+_DEF_TIMEOUT_MS = 15000
 
 
-def _exchange(kucoin_key: Optional[str] = None,
-              kucoin_secret: Optional[str] = None,
-              kucoin_passphrase: Optional[str] = None) -> ccxt.kucoin:
-    """
-    Create a ccxt KuCoin exchange instance. Public data does not require keys.
-    """
-    cfg = {
-        "enableRateLimit": True,
-        "options": {"defaultType": "spot"},
+def _exchange(
+    kucoin_key: Optional[str] = None,
+    kucoin_secret: Optional[str] = None,
+    kucoin_passphrase: Optional[str] = None,
+    *,
+    timeout_ms: int = _DEF_TIMEOUT_MS,
+    enable_rate_limit: bool = True,
+    proxy: Optional[str] = None,
+) -> ccxt.kucoin:
+    """Create a configured KuCoin ccxt client for SPOT only. Public data does not require keys."""
+    cfg: Dict[str, object] = {
+        "enableRateLimit": enable_rate_limit,
+        "timeout": timeout_ms,
+        "options": {"defaultType": "spot"},  # enforce SPOT
     }
     if kucoin_key and kucoin_secret and kucoin_passphrase:
         cfg.update({
@@ -48,51 +52,320 @@ def _exchange(kucoin_key: Optional[str] = None,
             "secret": kucoin_secret,
             "password": kucoin_passphrase,
         })
+    if proxy:
+        cfg["proxies"] = {"http": proxy, "https": proxy}
+
     ex = ccxt.kucoin(cfg)
-    ex.load_markets()
+    ex.load_markets()  # loads SPOT markets
     return ex
 
-def _to_dataframe(ohlcv):
+# ---------------------------------
+# Symbol normalization & validation
+# ---------------------------------
+
+def _normalize_symbol(symbol: str) -> str:
+    """Convert common forms (e.g., 'BTCUSDT', 'btc-usdt', 'btc/usdt') to 'BTC/USDT'."""
+    s = (symbol or "").strip().upper().replace("-", "/")
+    if "/" in s:
+        base, quote = s.split("/", 1)
+        return f"{base}/{quote}"
+    if s.endswith("USDT"):
+        return f"{s[:-4]}/USDT"
+    if s.endswith("USD"):
+        return f"{s[:-3]}/USD"
+    return s
+
+
+def _validate_symbol(ex: ccxt.Exchange, symbol: str) -> str:
+    """Normalize symbol and ensure it exists in the currently loaded SPOT markets.
+
+    Tries common quote variants if the initial form is not found.
+    Raises ValueError if not resolvable.
     """
-    ccxt OHLCV: [ts_ms, open, high, low, close, volume]
+    sym = _normalize_symbol(symbol)
+    if sym in ex.markets:
+        return sym
+
+    # try common quote alternatives
+    base = sym.split("/")[0] if "/" in sym else sym
+    for quote in ("USDT", "USD", "USDC", "TUSD"):
+        candidate = f"{base}/{quote}"
+        if candidate in ex.markets:
+            return candidate
+
+    raise ValueError(
+        f"Symbol '{symbol}' not found in SPOT markets"
+    )
+
+# ---------------------------------
+# DataFrame conversion & cleaning
+# ---------------------------------
+
+def _to_dataframe(ohlcv: List[List[float]]) -> pd.DataFrame:
+    """Convert ccxt OHLCV to a clean pandas DataFrame indexed by UTC time.
+
+    ccxt OHLCV format: [ts_ms, open, high, low, close, volume]
     """
+    cols = ["ts", "open", "high", "low", "close", "volume"]
     if not ohlcv:
-        return pd.DataFrame(columns=["open","high","low","close","volume"])
-    df = pd.DataFrame(ohlcv, columns=["ts","open","high","low","close","volume"])
+        return pd.DataFrame(columns=cols[1:])
+
+    df = pd.DataFrame(ohlcv, columns=cols)
     df["time"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-    df = (df.set_index("time")[["open","high","low","close","volume"]]
-            .astype(float)
-            .sort_index())          # BẮT BUỘC: đảm bảo ASC (cũ → mới)
-    df = df[~df.index.duplicated(keep="last")]  # bỏ nến trùng
-    return df
+    df = (
+        df.set_index("time")[cols[1:]]
+        .apply(pd.to_numeric, errors="coerce")
+        .replace([float("inf"), float("-inf")], pd.NA)
+        .sort_index()
+    )
+    # drop duplicated timestamps, keep the last (most up-to-date) record
+    df = df[~df.index.duplicated(keep="last")]
 
-def fetch_ohlcv(symbol: str, timeframe: str="4H", limit: int=300, since_ms=None,
-                kucoin_key=None, kucoin_secret=None, kucoin_passphrase=None) -> pd.DataFrame:
-    tf = TIMEFRAME_MAP.get(timeframe.upper(), timeframe)
-    ex = ccxt.kucoin({
-        "apiKey": kucoin_key or "",
-        "secret": kucoin_secret or "",
-        "password": kucoin_passphrase or "",
-        "enableRateLimit": True,
-        "options": {"defaultType": "spot"}
-    })
-    ex.load_markets()
-    sym = symbol.replace("-", "/").replace("USDTUSDT","USDT")
-    if "/" not in sym:
-        sym = sym[:-4] + "/" + sym[-4:]          # DOTUSDT -> DOT/USDT
-
-    raw = ex.fetch_ohlcv(sym, timeframe=tf, since=since_ms, limit=limit)
-    df  = _to_dataframe(raw)
-
-    # (khuyên dùng) bỏ nến đang chạy: giữ nguyên nếu bạn cần “realtime”
-    # bar_ms = ex.parse_timeframe(tf) * 1000
-    # if len(df) >= 2:
-    #     if (int(df.index[-1].value/1e6) % int(bar_ms)) != 0:
-    #         df = df.iloc[:-1]
+    # drop rows with NaN in O/H/L/C (volume can be 0.0)
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    # volume: fill NaN with 0 for safety
+    if "volume" in df.columns:
+        df["volume"] = df["volume"].fillna(0.0)
 
     return df
 
-def fetch_batch(symbol: str, timeframes=("1H","4H","1D"), limit=300, since_ms=None, **keys):
-    return {tf: fetch_ohlcv(symbol, timeframe=tf, limit=limit, since_ms=since_ms, **keys)
-            for tf in timeframes}
+# ---------------------------------
+# Helpers
+# ---------------------------------
 
+def _ccxt_timeframe_str(tf: str) -> str:
+    return TIMEFRAME_MAP.get(tf.upper(), tf)
+
+
+def _bar_ms(ex: ccxt.Exchange, tf_str: str) -> int:
+    """Milliseconds per bar for the ccxt timeframe string (e.g., '4h')."""
+    return int(ex.parse_timeframe(tf_str) * 1000)
+
+
+def _drop_partial_bar(df: pd.DataFrame, bar_ms: int) -> pd.DataFrame:
+    """Drop the last bar if it appears to be still forming (partial)."""
+    if df is None or df.empty or len(df) < 2:
+        return df
+    # pandas Timestamp -> ns; convert to ms
+    last_ms = int(df.index[-1].value / 1e6)
+    if (last_ms % bar_ms) != 0:
+        return df.iloc[:-1]
+    return df
+
+
+def _retry_sleep(attempt: int, base: float = 0.5, cap: float = 5.0) -> None:
+    """Exponential backoff sleep with jitter."""
+    delay = min(cap, base * (2 ** attempt))
+    time.sleep(delay)
+
+# ---------------------------------
+# Public API
+# ---------------------------------
+
+def fetch_ohlcv(
+    symbol: str,
+    timeframe: str = "4H",
+    *,
+    limit: int = 300,
+    since_ms: Optional[int] = None,
+    kucoin_key: Optional[str] = None,
+    kucoin_secret: Optional[str] = None,
+    kucoin_passphrase: Optional[str] = None,
+    timeout_ms: int = _DEF_TIMEOUT_MS,
+    enable_rate_limit: bool = True,
+    proxy: Optional[str] = None,
+    drop_partial: bool = False,
+    max_retries: int = 3,
+) -> pd.DataFrame:
+    """Fetch OHLCV into a cleaned DataFrame.
+
+    Notes:
+      - SPOT only client
+      - Partial-bar dropping is applied ONLY if `drop_partial=True` **and** timeframe == '1H'.
+    """
+    tf_str = _ccxt_timeframe_str(timeframe)
+    ex = _exchange(
+        kucoin_key, kucoin_secret, kucoin_passphrase,
+        timeout_ms=timeout_ms,
+        enable_rate_limit=enable_rate_limit,
+        proxy=proxy,
+    )
+    sym = _validate_symbol(ex, symbol)
+
+    # retry loop for robustness
+    attempt = 0
+    while True:
+        try:
+            raw = ex.fetch_ohlcv(sym, timeframe=tf_str, since=since_ms, limit=limit)
+            df = _to_dataframe(raw)
+            # Only drop partial bar for 1H timeframe
+            if drop_partial and tf_str == "1h" and not df.empty:
+                df = _drop_partial_bar(df, _bar_ms(ex, tf_str))
+            return df
+        except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RequestTimeout):
+            if attempt >= max_retries:
+                raise
+            _retry_sleep(attempt)
+            attempt += 1
+        except ccxt.RateLimitExceeded:
+            if attempt >= max_retries:
+                raise
+            _retry_sleep(attempt, base=1.0, cap=10.0)
+            attempt += 1
+
+
+def fetch_ohlcv_history(
+    symbol: str,
+    timeframe: str = "4H",
+    *,
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
+    limit: int = 300,
+    kucoin_key: Optional[str] = None,
+    kucoin_secret: Optional[str] = None,
+    kucoin_passphrase: Optional[str] = None,
+    timeout_ms: int = _DEF_TIMEOUT_MS,
+    enable_rate_limit: bool = True,
+    proxy: Optional[str] = None,
+    drop_partial: bool = False,
+    max_retries: int = 3,
+    sleep_sec: float = 0.2,
+    max_pages: Optional[int] = None,
+) -> pd.DataFrame:
+    """Deep historical pagination of OHLCV (SPOT only).
+
+    Fetches multiple pages to cover [start_ms, end_ms] (UTC ms). If start_ms is
+    None, it will page backwards from 'now' until max_pages (if set) or until no
+    more data is returned.
+
+    Partial-bar dropping at the end is applied ONLY for 1H timeframe if requested.
+    """
+    tf_str = _ccxt_timeframe_str(timeframe)
+    ex = _exchange(
+        kucoin_key, kucoin_secret, kucoin_passphrase,
+        timeout_ms=timeout_ms,
+        enable_rate_limit=enable_rate_limit,
+        proxy=proxy,
+    )
+    sym = _validate_symbol(ex, symbol)
+
+    bar_ms = _bar_ms(ex, tf_str)
+    if end_ms is None:
+        end_ms = int(time.time() * 1000)
+
+    frames: List[pd.DataFrame] = []
+    pages = 0
+
+    cursor_since = start_ms
+    if cursor_since is None:
+        cursor_since = end_ms - limit * bar_ms
+
+    while True:
+        if max_pages is not None and pages >= max_pages:
+            break
+
+        df = fetch_ohlcv(
+            sym,
+            timeframe=tf_str,
+            limit=limit,
+            since_ms=cursor_since,
+            kucoin_key=kucoin_key,
+            kucoin_secret=kucoin_secret,
+            kucoin_passphrase=kucoin_passphrase,
+            timeout_ms=timeout_ms,
+            enable_rate_limit=enable_rate_limit,
+            proxy=proxy,
+            drop_partial=False,  # handle partial at the end only
+            max_retries=max_retries,
+        )
+
+        if df.empty:
+            break
+
+        frames.append(df)
+        pages += 1
+
+        first_ts = int(df.index[0].value / 1e6)  # ms
+        if start_ms is not None and first_ts <= start_ms:
+            break
+
+        cursor_since = first_ts - limit * bar_ms
+        time.sleep(sleep_sec)
+
+    if not frames:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])  # empty
+
+    out = pd.concat(frames, axis=0).sort_index()
+    out = out[~out.index.duplicated(keep="last")]
+
+    if start_ms is not None:
+        out = out[out.index >= pd.to_datetime(start_ms, unit="ms", utc=True)]
+    if end_ms is not None:
+        out = out[out.index <= pd.to_datetime(end_ms, unit="ms", utc=True)]
+
+    # Only drop partial bar for 1H timeframe
+    if drop_partial and tf_str == "1h" and not out.empty:
+        out = _drop_partial_bar(out, bar_ms)
+
+    return out
+
+
+def fetch_batch(
+    symbol: str,
+    timeframes: Iterable[str] = ("1H", "4H", "1D"),
+    *,
+    limit: int = 300,
+    since_ms: Optional[int] = None,
+    kucoin_key: Optional[str] = None,
+    kucoin_secret: Optional[str] = None,
+    kucoin_passphrase: Optional[str] = None,
+    timeout_ms: int = _DEF_TIMEOUT_MS,
+    enable_rate_limit: bool = True,
+    proxy: Optional[str] = None,
+    drop_partial: bool = False,
+) -> Dict[str, pd.DataFrame]:
+    """Fetch multiple timeframes at once, returning a dict {tf: DataFrame}."""
+    ex = _exchange(
+        kucoin_key, kucoin_secret, kucoin_passphrase,
+        timeout_ms=timeout_ms,
+        enable_rate_limit=enable_rate_limit,
+        proxy=proxy,
+    )
+    sym = _validate_symbol(ex, symbol)
+
+    out: Dict[str, pd.DataFrame] = {}
+    for tf in timeframes:
+        # Apply partial-bar drop only for 1H
+        partial_flag = drop_partial and (tf.upper() == "1H")
+        out[tf] = fetch_ohlcv(
+            sym,
+            timeframe=tf,
+            limit=limit,
+            since_ms=since_ms,
+            kucoin_key=kucoin_key,
+            kucoin_secret=kucoin_secret,
+            kucoin_passphrase=kucoin_passphrase,
+            timeout_ms=timeout_ms,
+            enable_rate_limit=enable_rate_limit,
+            proxy=proxy,
+            drop_partial=partial_flag,
+        )
+    return out
+
+# --------------------------
+# Example (commented):
+# --------------------------
+# if __name__ == "__main__":
+#     # Fetch last ~300 1H candles for BTC/USDT (spot) and drop partial bar
+#     df = fetch_ohlcv("BTCUSDT", timeframe="1H", drop_partial=True)
+#     print(df.tail())
+#
+#     # Deep history: last 365 days of 4H bars (realtime, no partial dropping)
+#     one_year_ms = int((time.time() - 365 * 86400) * 1000)
+#     hist = fetch_ohlcv_history(
+#         "BTC/USDT",
+#         timeframe="4H",
+#         start_ms=one_year_ms,
+#         drop_partial=False,
+#     )
+#     print(hist.shape)
