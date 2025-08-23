@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 import pandas as pd
+from indicators import calc_vp
 
 # =============================
 # Helpers chung
@@ -239,12 +240,175 @@ def compute_levels(
     tol_coef: float = 0.5,
     extremes: int = 12,
     lookback: int = 300,
+    vp_zones: Optional[List[Dict[str, Any]]] = None,
+    weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """SR cứng từ local HL + extreme closes, cluster bởi tol = tol_coef*ATR.
-    Trả ra sr_up/sr_down so với close hiện tại và danh sách bands (clusters).
+    Bổ sung: touch count, dwell time, confluence psych level, volume-profile weight,
+    và score/strength để xếp hạng band phục vụ ENTRY/TP/SL.
+
+    Args:
+        atr: ATR hiện tại; nếu None sẽ lấy từ df['atr14'].
+        tol_coef: hệ số cluster theo ATR (mặc định 0.5).
+        extremes: số lượng extremes (close) hai phía để lấy ứng viên.
+        lookback: số nến dùng để tính SR.
+        vp_zones: danh sách vùng volume profile (nếu có), mỗi phần tử dạng
+                  {"price_range": (lo, hi), "volume_sum": float}.
+        weights: trọng số để tính điểm band, keys: touch/dwell/psych/vp.
+
+    Returns:
+        {
+          "sr_up": [...], "sr_down": [...],
+          "bands_up": [{"band":[lo,hi], "tp":tp, "touches":int, "dwell":int,
+                         "psych_conf":0..1, "vp_weight":0..1,
+                         "score":0..1, "strength":"weak|medium|strong"}, ...],
+          "bands_down": [...],
+          "tol": float,
+        }
     """
+    import math
+
+    # ---------- Helpers (local to function) ----------
+    def level_stats(sub_df: pd.DataFrame, level: float, tol: float) -> Tuple[int, int]:
+        hi, lo = sub_df['high'], sub_df['low']
+        in_band = (lo <= level + tol) & (hi >= level - tol)
+        touches = int(((~in_band.shift(1, fill_value=False)) & in_band).sum())
+        close_band = sub_df['close'].between(level - 0.3*tol, level + 0.3*tol)
+        dwell = int(close_band.sum())
+        return touches, dwell
+
+    def round_step(price: float) -> float:
+        p = max(price, 1e-9)
+        p10 = 10 ** math.floor(math.log10(p))
+        for m in (1, 2, 5):
+            step = m * p10
+            if p / step < 20:
+                return step
+        return 10 * p10
+
+    def psych_confluence(level: float, tol: float) -> float:
+        step = round_step(level)
+        nearest = round(level / step) * step
+        dist = abs(level - nearest)
+        return max(0.0, 1.0 - dist / max(tol, 1e-9))
+
+    def overlap_ratio(a_lo: float, a_hi: float, b_lo: float, b_hi: float) -> float:
+        inter = max(0.0, min(a_hi, b_hi) - max(a_lo, b_lo))
+        base = max(1e-9, a_hi - a_lo)
+        return inter / base
+
+    def vp_band_weight(band: Tuple[float, float], zones: Optional[List[Dict[str, Any]]]) -> float:
+        if not zones:
+            return 0.0
+        vmax = max((float(z.get('volume_sum', 0.0)) for z in zones), default=0.0) or 1.0
+        lo, hi = band
+        best = 0.0
+        for z in zones:
+            zlo, zhi = float(z['price_range'][0]), float(z['price_range'][1])
+            r = overlap_ratio(lo, hi, zlo, zhi)
+            v = float(z.get('volume_sum', 0.0)) / vmax
+            best = max(best, r * v)  # overlap * normalized volume strength
+        return max(0.0, min(1.0, best))
+
+    def make_bands(levels: List[float], tol: float) -> List[List[float]]:
+        bands: List[List[float]] = []
+        for p in levels:
+            if not bands or abs(p - bands[-1][-1]) > tol:
+                bands.append([p])
+            else:
+                bands[-1].append(p)
+        return bands
+
+    def enrich_bands(bands: List[List[float]], sub_df: pd.DataFrame, tol: float) -> List[Dict[str, Any]]:
+        raw: List[Dict[str, Any]] = []
+        for grp in bands:
+            lo, hi = min(grp), max(grp)
+            tp = round((lo + hi) / 2.0, 2)
+            touches, dwell = level_stats(sub_df, tp, tol)
+            psych = psych_confluence(tp, tol)
+            vpw = vp_band_weight((lo, hi), vp_zones)
+            raw.append({
+                "band": [lo, hi], "tp": tp,
+                "touches": touches, "dwell": dwell,
+                "psych_conf": round(psych, 3),
+                "vp_weight": round(vpw, 3),
+            })
+        # Normalize touches/dwell to 0..1
+        max_t = max((b['touches'] for b in raw), default=0) or 1
+        max_d = max((b['dwell'] for b in raw), default=0) or 1
+        for b in raw:
+            b['norm_touch'] = b['touches'] / max_t
+            b['norm_dwell'] = b['dwell'] / max_d
+        # Scoring
+        w = {"touch": 0.35, "dwell": 0.20, "psych": 0.25, "vp": 0.20}
+        if weights:
+            w.update({k: float(v) for k, v in weights.items() if k in w})
+        for b in raw:
+            score = (
+                w['touch'] * b['norm_touch'] +
+                w['dwell'] * b['norm_dwell'] +
+                w['psych'] * b['psych_conf'] +
+                w['vp'] * b['vp_weight']
+            )
+            b['score'] = round(float(score), 3)
+            b['strength'] = 'strong' if b['score'] >= 0.7 else ('medium' if b['score'] >= 0.5 else 'weak')
+            # cleanup norms from output (optional)
+            del b['norm_touch']; del b['norm_dwell']
+        # sort by score desc
+        raw.sort(key=lambda x: x['score'], reverse=True)
+        return raw
+
+    # ---------- Core computation ----------
     sub = df.tail(lookback)
     px = float(sub['close'].iloc[-1])
+
+    if atr is None:
+        atr = float(sub['atr14'].iloc[-1]) if 'atr14' in sub.columns else 0.0
+    tol = max(atr * tol_coef, 1e-6)
+
+    highs = sub['high']; lows = sub['low']
+    loc_high = highs[(highs.shift(1) < highs) & (highs.shift(-1) < highs)]
+    loc_low = lows[(lows.shift(1) > lows) & (lows.shift(-1) > lows)]
+
+    closes = sub['close']
+    extreme_up = closes.nlargest(extremes).tolist()
+    extreme_dn = closes.nsmallest(extremes).tolist()
+
+    cands: List[float] = []
+    cands += [float(x) for x in loc_high.dropna().tolist()]
+    cands += [float(x) for x in loc_low.dropna().tolist()]
+    cands += [float(x) for x in extreme_up if np.isfinite(x)]
+    cands += [float(x) for x in extreme_dn if np.isfinite(x)]
+
+    cands = sorted(set(round(x, 4) for x in cands))
+
+    # one-pass cluster with tolerance
+    merged: List[float] = []
+    for p in cands:
+        if not merged:
+            merged.append(p)
+            continue
+        if abs(p - merged[-1]) <= tol:
+            merged[-1] = (merged[-1] + p) / 2.0
+        else:
+            merged.append(p)
+
+    sr_up = sorted({x for x in merged if x > px})
+    sr_dn = sorted({x for x in merged if x < px})
+
+    bands_up = make_bands(sr_up, tol)
+    bands_dn = make_bands(sr_dn, tol)
+
+    enriched_up = enrich_bands(bands_up, sub, tol)
+    enriched_dn = enrich_bands(bands_dn, sub, tol)
+
+    return {
+        "sr_up": [round(x, 4) for x in sr_up],
+        "sr_down": [round(x, 4) for x in sr_dn],
+        "bands_up": enriched_up,
+        "bands_down": enriched_dn,
+        "tol": float(tol),
+    }
 
     if atr is None:
         atr = float(sub['atr14'].iloc[-1]) if 'atr14' in sub.columns else 0.0
@@ -334,6 +498,16 @@ def compute_soft_levels(df: pd.DataFrame) -> Dict[str, List[Dict[str, float]]]:
 # ĐA KHUNG THỜI GIAN
 # =============================
 
+# cấu hình Volume Profile theo từng khung
+TF_VP = {
+    "1H": dict(window_bars=240, bins=40, top_k=10),   # ~10 ngày 1H
+    "4H": dict(window_bars=240, bins=30, top_k=10),   # ~40 ngày 4H
+    "1D": dict(window_bars=180, bins=24, top_k=8),    # ~6 tháng 1D
+}
+
+# trọng số xếp hạng band SR
+LEVEL_WEIGHTS = {"touch": 0.35, "dwell": 0.20, "psych": 0.25, "vp": 0.20}
+
 def compute_features_by_tf(dfs_by_tf: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
     """Tính toàn bộ primitives cho nhiều TF. dfs_by_tf ví dụ: {'1H': df1h, '4H': df4h, '1D': df1d}
     Trả dict theo từng TF với cấu trúc đồng nhất.
@@ -344,13 +518,27 @@ def compute_features_by_tf(dfs_by_tf: Dict[str, pd.DataFrame]) -> Dict[str, Any]
             out[tf] = {"error": "empty df"}
             continue
         df = df.sort_index()
-        swings = compute_swings(df)
-        trend = compute_trend(df)
+
+        swings  = compute_swings(df)
+        trend   = compute_trend(df)
         candles = compute_candles(df)
-        vol = compute_volume_features(df)
-        mom = compute_momentum(df)
-        vola = compute_volatility(df)
-        sr = compute_levels(df, atr=vola.get('atr', 0.0))
+        vol     = compute_volume_features(df)
+        mom     = compute_momentum(df)
+        vola    = compute_volatility(df)
+
+        # Volume Profile theo TF
+        vp_cfg = TF_VP.get(tf.upper(), TF_VP["4H"])
+        try:
+            vp_zones = calc_vp(df, **vp_cfg)  # list[{price_range, price_mid, volume_sum}]
+        except Exception:
+            vp_zones = []
+
+        # SR cứng + ranking (đưa vp_zones & weights vào)
+        sr = compute_levels(
+            df, atr=vola.get('atr', 0.0),
+            vp_zones=vp_zones,
+            weights=LEVEL_WEIGHTS,
+        )
         soft = compute_soft_levels(df)
 
         out[tf] = {
@@ -362,5 +550,6 @@ def compute_features_by_tf(dfs_by_tf: Dict[str, pd.DataFrame]) -> Dict[str, Any]
             "volatility": vola,
             "levels": sr,
             "soft_levels": soft,
+            "vp_zones": vp_zones,
         }
     return out
